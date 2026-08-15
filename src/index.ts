@@ -345,7 +345,7 @@ export async function runChildAgent(options: ChildAgentOptions): Promise<ChildAg
 			? "aborted"
 			: outcome.spawnError || outcome.exitCode !== 0 || state.stopReason === "error" || state.stopReason === "aborted"
 				? "failed"
-				: state.agentEnded || state.assistantMessage
+				: state.agentEnded && state.assistantMessage
 					? "completed"
 					: "failed";
 
