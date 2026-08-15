@@ -138,8 +138,9 @@ export function buildChildArgs(options: {
  */
 export function resolvePiInvocation(): ChildInvocation {
 	const currentScript = process.argv[1];
+	const isPiProcess = process.env.PI_CODING_AGENT === "true";
 	const isBunVirtualScript = currentScript?.startsWith("/$bunfs/root/");
-	if (currentScript && !isBunVirtualScript && existsSync(currentScript)) {
+	if (isPiProcess && currentScript && !isBunVirtualScript && existsSync(currentScript)) {
 		return { command: process.execPath, args: [currentScript] };
 	}
 
