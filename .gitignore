@@ -1,0 +1,10 @@
+node_modules/
+dist/
+
+# macOS filesystem metadata
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100/
+.Trashes/
