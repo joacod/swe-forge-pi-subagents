@@ -3,6 +3,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { discoverSWEForgeInstallation } from "./discovery.js";
 
 export * from "./discovery.js";
+export * from "./projection.js";
 
 export const SWE_FORGE_SUBAGENT_TOOL_NAME = "swe_forge_subagent";
 
