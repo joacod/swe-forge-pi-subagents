@@ -1,16 +1,18 @@
-import { access, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { access, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { after, afterEach, before, test } from "node:test";
 import assert from "node:assert/strict";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import {
 	executeSWEForgeTask,
 	READ_ONLY_TOOLS,
 	runChildAgent,
+	isSupportedPiVersion,
 	WRITABLE_TOOLS,
 } from "../src/runtime.js";
 import { SWE_FORGE_ROOT_ENV } from "../src/discovery.js";
 import { SWEForgeRuntimeError } from "../src/projection.js";
+import { copyFakeSWEForgeInstallation } from "./fixtures.js";
 
 const temporaryPaths: string[] = [];
 let fixturePath: string;
@@ -40,8 +42,12 @@ if (mode === "hang") {
 } else if (mode === "error") {
   process.stderr.write("fixture child failed\n");
   process.exit(7);
+} else if (mode === "no-result") {
+  process.stdout.write(JSON.stringify({ type: "agent_end", messages: [] }) + "\n");
 } else {
-  const output = mode === "review" ? ${JSON.stringify(REVIEW_OUTPUT)} : mode === "malformed" ? "STATUS: DONE\nTASK_ID: task-123\nSUMMARY: incomplete\n" : ${JSON.stringify(RESULT_OUTPUT)};
+  if (mode === "noise") process.stdout.write("not-json\n");
+  if (mode === "invalid-utf8") process.stdout.write(Buffer.from([123, 34, 116, 121, 112, 101, 34, 58, 34, 110, 111, 105, 115, 101, 34, 44, 34, 120, 34, 58, 34, 255, 34, 125, 10]));
+  const output = mode === "review" ? ${JSON.stringify(REVIEW_OUTPUT)} : mode === "malformed" ? "STATUS: DONE\nTASK_ID: task-123\nSUMMARY: incomplete\n" : mode === "truncated" ? "STATUS: DONE\nTASK_ID: task-123\nSUMMARY: " + "x".repeat(300000) + "\nVALIDATION: fixture passed\n" : ${JSON.stringify(RESULT_OUTPUT)};
   const intermediate = { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "intermediate" }], stopReason: "toolUse" } };
   const final = { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: output }], stopReason: "stop" } };
   const ended = { type: "agent_end", messages: [final.message] };
@@ -51,24 +57,19 @@ if (mode === "hang") {
 }`;
 
 async function createCanonicalRoot(): Promise<string> {
-	const root = await mkdtemp(join(tmpdir(), "swe-forge-runtime-root-"));
+	const root = await copyFakeSWEForgeInstallation();
 	temporaryPaths.push(root);
-	await mkdir(join(root, ".swe-forge", "agents"), { recursive: true });
-	await mkdir(join(root, ".swe-forge", "contracts"), { recursive: true });
 	await Promise.all([
-		writeFile(join(root, "SWE-FORGE.md"), "workflow\n"),
-		writeFile(join(root, "AGENTS.md"), "instructions\n"),
-		writeFile(join(root, "VERSION"), "1.0.0\n"),
 		writeFile(join(root, ".swe-forge", "agents", "reader.md"), "# Reader\n\nRead-only canonical role.\n"),
 		writeFile(join(root, ".swe-forge", "agents", "writer.md"), "# Writer\n\nWritable canonical role.\n"),
 		writeFile(join(root, ".swe-forge", "contracts", "task.md"), TASK_CONTRACT),
 		writeFile(
 			join(root, ".swe-forge", "contracts", "result.md"),
-			"# Result Contract\n\nSTATUS:\nTASK_ID:\nSUMMARY:\nVALIDATION:\n",
+			"# Result Contract\n\nSTATUS: DONE | BLOCKED | FAILED\nTASK_ID: <task identifier>\nSUMMARY:\nVALIDATION:\n",
 		),
 		writeFile(
 			join(root, ".swe-forge", "contracts", "review.md"),
-			"# Review Contract\n\nSTATUS:\nTASK_ID:\nREVIEW_FOCUS:\nFINDINGS:\n",
+			"# Review Contract\n\nstatus: PASS | CHANGES_REQUIRED\nreview_focus:\nfindings:\n",
 		),
 	]);
 	return root;
@@ -144,7 +145,7 @@ function childOptions(
 
 before(async () => {
 	fixturePath = join(await mkdtemp(join(tmpdir(), "swe-forge-runtime-fixture-")), "child.mjs");
-	temporaryPaths.push(fixturePath.slice(0, fixturePath.lastIndexOf("/")));
+	temporaryPaths.push(dirname(fixturePath));
 	await writeFile(fixturePath, FIXTURE_SOURCE, "utf8");
 });
 
@@ -153,7 +154,7 @@ afterEach(async () => {
 	// The fixture is recreated for the next test because afterEach also removes
 	// the directory that contains it.
 	fixturePath = join(await mkdtemp(join(tmpdir(), "swe-forge-runtime-fixture-")), "child.mjs");
-	temporaryPaths.push(fixturePath.slice(0, fixturePath.lastIndexOf("/")));
+	temporaryPaths.push(dirname(fixturePath));
 	await writeFile(fixturePath, FIXTURE_SOURCE, "utf8");
 });
 
@@ -185,12 +186,30 @@ test("runs a read-only role with only the READ_ONLY profile and removes prompt m
 	assert.equal(record.args.includes("--no-themes"), true);
 	assert.equal(record.args.includes("--no-context-files"), true);
 	assert.equal(record.args.includes("--no-session"), true);
+	assert.equal(record.args.includes("--no-approve"), true);
 	assert.deepEqual(optionValue(record.args, "--exclude-tools")?.split(","), ["subagent", "swe_forge_subagent"]);
 	assert.match(record.prompt ?? "", /Read-only canonical role\./u);
 	assert.match(record.prompt ?? "", /TASK_ID: task-123/u);
 	assert.match(record.prompt ?? "", /EXPECTED CANONICAL RESULT CONTRACT/u);
 	assert.ok(record.promptPath);
 	await assert.rejects(access(record.promptPath));
+});
+
+test("normalizes a symlinked cwd before launching the child", async () => {
+	if (process.platform === "win32") return;
+	const root = await createCanonicalRoot();
+	const project = await createProject();
+	const alias = `${project}-alias`;
+	await symlink(project, alias, "dir");
+	temporaryPaths.push(alias);
+	const recordPathValue = await recordPath();
+	const result = await executeSWEForgeTask({
+		...childOptions(root, alias, recordPathValue, "success", "READ_ONLY"),
+	});
+	const record = await readRecord(recordPathValue);
+
+	assert.equal(record.cwd, await realpath(project));
+	assert.equal(result.runtime.cwd, await realpath(project));
 });
 
 test("runs a writable role with the exact WRITABLE profile", async () => {
@@ -287,6 +306,51 @@ test("returns child process errors as failed runtime metadata", async () => {
 	assert.equal(result.runtime.cleanup, "complete");
 });
 
+test("fails clearly when a worker exits without a canonical result", async () => {
+	const root = await createCanonicalRoot();
+	const project = await createProject();
+	const recordPathValue = await recordPath();
+	const result = await executeSWEForgeTask(childOptions(root, project, recordPathValue, "no-result", "READ_ONLY"));
+
+	assert.equal(result.runtime.status, "failed");
+	assert.match(result.runtime.errorMessage ?? "", /canonical assistant result/u);
+	assert.equal(result.validation, undefined);
+});
+
+test("fails closed on contaminated JSON output", async () => {
+	const root = await createCanonicalRoot();
+	const project = await createProject();
+	const recordPathValue = await recordPath();
+	const result = await executeSWEForgeTask(childOptions(root, project, recordPathValue, "noise", "READ_ONLY"));
+
+	assert.equal(result.runtime.status, "failed");
+	assert.match(result.runtime.errorMessage ?? "", /non-JSON event line/u);
+	assert.equal(result.validation, undefined);
+});
+
+test("fails closed on invalid UTF-8 event data", async () => {
+	const root = await createCanonicalRoot();
+	const project = await createProject();
+	const recordPathValue = await recordPath();
+	const result = await executeSWEForgeTask(childOptions(root, project, recordPathValue, "invalid-utf8", "READ_ONLY"));
+
+	assert.equal(result.runtime.status, "failed");
+	assert.match(result.runtime.errorMessage ?? "", /invalid UTF-8/u);
+	assert.equal(result.validation, undefined);
+});
+
+test("fails closed when model output is truncated", async () => {
+	const root = await createCanonicalRoot();
+	const project = await createProject();
+	const recordPathValue = await recordPath();
+	const result = await executeSWEForgeTask(childOptions(root, project, recordPathValue, "truncated", "READ_ONLY"));
+
+	assert.equal(result.runtime.status, "failed");
+	assert.equal(result.runtime.outputTruncated, true);
+	assert.match(result.runtime.errorMessage ?? "", /truncated/u);
+	assert.equal(result.validation, undefined);
+});
+
 test("propagates cancellation and removes temporary prompt material", async () => {
 	const root = await createCanonicalRoot();
 	const project = await createProject();
@@ -305,6 +369,14 @@ test("propagates cancellation and removes temporary prompt material", async () =
 	assert.equal(result.validation, undefined);
 	assert.ok(record.promptPath);
 	await assert.rejects(access(record.promptPath));
+});
+
+test("recognizes only the tested Pi compatibility line", () => {
+	assert.equal(isSupportedPiVersion("0.84.1"), true);
+	assert.equal(isSupportedPiVersion("0.84.2"), true);
+	assert.equal(isSupportedPiVersion("0.85.0"), false);
+	assert.equal(isSupportedPiVersion("0.84.1-beta.1"), false);
+	assert.equal(isSupportedPiVersion("not-a-version"), false);
 });
 
 test("fails before launch when no explicit model is supplied", async () => {

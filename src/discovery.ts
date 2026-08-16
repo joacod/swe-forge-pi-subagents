@@ -5,6 +5,17 @@ import { isAbsolute, join, normalize, resolve } from "node:path";
 /** The only supported development/test override for the canonical root. */
 export const SWE_FORGE_ROOT_ENV = "SWE_FORGE_ROOT";
 
+/**
+ * The adapter deliberately supports one SWE-Forge compatibility line. The
+ * canonical files are loaded live, but a version outside this line is not
+ * assumed to have the same role/contract semantics.
+ */
+export const SWE_FORGE_COMPATIBILITY_POLICY = {
+	range: "0.1.x",
+	minimumTested: "0.1.0-alpha.1",
+	maximumExclusive: "0.2.0",
+} as const;
+
 const DEFAULT_SUPPORT_PATH = join(".pi", "agent", "swe-forge");
 const REQUIRED_ENTRIES = [
 	{ name: "SWE-FORGE.md", kind: "file" },
@@ -14,10 +25,16 @@ const REQUIRED_ENTRIES = [
 ] as const;
 
 type RequiredEntry = (typeof REQUIRED_ENTRIES)[number];
-export type SWEForgeInstallationErrorCode = "NOT_INSTALLED" | "INCOMPLETE" | "INVALID_PATH";
+export type SWEForgeInstallationErrorCode =
+	| "NOT_INSTALLED"
+	| "INCOMPLETE"
+	| "INVALID_PATH"
+	| "INVALID_VERSION"
+	| "UNSUPPORTED_VERSION";
 
 export interface SWEForgeInstallationErrorOptions {
 	readonly root?: string;
+	readonly version?: string;
 	readonly missing?: readonly string[];
 	readonly invalid?: readonly string[];
 	readonly cause?: unknown;
@@ -27,6 +44,7 @@ export interface SWEForgeInstallationErrorOptions {
 export class SWEForgeInstallationError extends Error {
 	readonly code: SWEForgeInstallationErrorCode;
 	readonly root?: string;
+	readonly version?: string;
 	readonly missing: readonly string[];
 	readonly invalid: readonly string[];
 	readonly cause?: unknown;
@@ -36,6 +54,7 @@ export class SWEForgeInstallationError extends Error {
 		this.name = "SWEForgeInstallationError";
 		this.code = code;
 		this.root = options.root;
+		this.version = options.version;
 		this.missing = options.missing ?? [];
 		this.invalid = options.invalid ?? [];
 		this.cause = options.cause;
@@ -63,6 +82,43 @@ export interface SWEForgeDiscoveryOptions {
 	readonly env?: Readonly<Record<string, string | undefined>>;
 	/** Injectable home directory for tests; not a second user configuration mechanism. */
 	readonly homeDirectory?: string;
+}
+
+export interface SWEForgeVersion {
+	readonly major: number;
+	readonly minor: number;
+	readonly patch: number;
+	readonly prerelease?: string;
+	readonly build?: string;
+}
+
+const SEMVER_PATTERN = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$/u;
+
+/** Parse the strict semantic version format used by the canonical VERSION file. */
+export function parseSWEForgeVersion(value: string): SWEForgeVersion | undefined {
+	const match = SEMVER_PATTERN.exec(value.trim());
+	if (!match) return undefined;
+	const prerelease = match[4];
+	if (
+		prerelease?.split(".").some(
+			(identifier) => /^\d+$/u.test(identifier) && identifier.length > 1 && identifier.startsWith("0"),
+		)
+	) {
+		return undefined;
+	}
+	return {
+		major: Number(match[1]),
+		minor: Number(match[2]),
+		patch: Number(match[3]),
+		...(match[4] === undefined ? {} : { prerelease: match[4] }),
+		...(match[5] === undefined ? {} : { build: match[5] }),
+	};
+}
+
+/** Return whether a canonical installation is inside the tested compatibility line. */
+export function isSupportedSWEForgeVersion(value: string): boolean {
+	const version = parseSWEForgeVersion(value);
+	return version !== undefined && version.major === 0 && version.minor === 1;
 }
 
 function errorCode(error: unknown): string | undefined {
@@ -133,6 +189,9 @@ async function validateEntries(root: string): Promise<{ missing: string[]; inval
 			const info = await stat(path);
 			const correctType = entry.kind === "file" ? info.isFile() : info.isDirectory();
 			if (!correctType) invalid.push(entry.name);
+			else if (entry.kind === "file" && entry.name !== "VERSION" && info.size === 0) {
+				invalid.push(`${entry.name} (empty)`);
+			}
 		} catch (error) {
 			const code = errorCode(error);
 			if (code === "ENOENT" || code === "ENOTDIR") missing.push(entry.name);
@@ -163,15 +222,24 @@ export async function discoverSWEForgeInstallation(
 	const { missing, invalid } = await validateEntries(root);
 
 	let version: string | undefined;
+	let invalidVersion = false;
 	const versionPath = entryPath(root, { name: "VERSION", kind: "file" });
 	if (!missing.includes("VERSION") && !invalid.includes("VERSION")) {
 		try {
 			const contents = await readFile(versionPath, "utf8");
-			version = contents.split(/\r?\n/u, 1)[0]?.trim();
-			if (!version || version.includes("\0")) invalid.push("VERSION (empty or invalid)");
+			const candidate = contents.split(/\r?\n/u, 1)[0]?.replace(/^\uFEFF/u, "").trim();
+			if (!candidate || candidate.includes("\0") || parseSWEForgeVersion(candidate) === undefined) {
+				invalidVersion = true;
+			} else {
+				version = candidate;
+			}
 		} catch {
 			invalid.push("VERSION (unreadable)");
 		}
+	}
+
+	if (invalidVersion && (missing.length > 0 || invalid.length > 0)) {
+		invalid.push("VERSION (invalid semantic version)");
 	}
 
 	if (missing.length > 0 || invalid.length > 0) {
@@ -186,11 +254,27 @@ export async function discoverSWEForgeInstallation(
 		);
 	}
 
+	if (invalidVersion) {
+		throw new SWEForgeInstallationError(
+			"INVALID_VERSION",
+			`SWE Forge VERSION is not a strict semantic version at ${versionPath}`,
+			{ root, invalid: ["VERSION"] },
+		);
+	}
+
 	if (!version) {
 		throw new SWEForgeInstallationError(
 			"INCOMPLETE",
 			`SWE Forge VERSION could not be loaded at ${versionPath}`,
 			{ root, invalid: ["VERSION"] },
+		);
+	}
+
+	if (!isSupportedSWEForgeVersion(version)) {
+		throw new SWEForgeInstallationError(
+			"UNSUPPORTED_VERSION",
+			`SWE Forge version ${version} is outside the supported compatibility line ${SWE_FORGE_COMPATIBILITY_POLICY.range}; refusing to guess canonical semantics.`,
+			{ root, version },
 		);
 	}
 

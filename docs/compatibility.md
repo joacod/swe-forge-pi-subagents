@@ -1,0 +1,111 @@
+# Compatibility and safety boundary
+
+This package is a deliberately narrow Pi `SUBAGENTS` execution primitive. It
+projects live SWE-Forge sources and starts one bounded child process; it does
+not provide workflow orchestration, worktrees, a sandbox, retries, or delivery
+automation.
+
+## Tested matrix
+
+| Component | Tested assumption |
+| --- | --- |
+| Node.js | 24.15.0 in the local validation environment; package floor is 22.19.0 because the supported Pi line has that engine floor |
+| Pi package/API | `@earendil-works/pi-coding-agent` 0.84.1 from the package development install |
+| Pi CLI | 0.84.1 from the package development install; the host's separately installed Pi 0.84.2 was inspected for the same public CLI/event surfaces |
+| Pi compatibility line | `>=0.84.1 <0.85.0`; the runtime probes the real child CLI before a task and fails closed when the version cannot be read or is outside this line |
+| SWE-Forge fixture | 0.1.0-alpha.1, with the live canonical root shape required by discovery |
+| SWE-Forge compatibility line | `0.1.x`; malformed or outside-line `VERSION` values fail before role/contract projection |
+| Platforms | macOS was exercised. POSIX cancellation uses a detached process group; Windows uses direct termination plus best-effort `taskkill /T /F`. Windows and Linux remain portability targets, not fully exercised release claims. |
+
+The SWE-Forge version policy is intentionally conservative. This adapter does
+not claim exact semantic compatibility with arbitrary future roles, contracts,
+or policy revisions. It accepts only the tested 0.1.x line, validates the
+required contract shape, and reports an explicit compatibility error for an
+unknown or unsupported version. It loads the installed files at runtime and
+does **not** pin or bundle canonical roles/contracts.
+
+## Canonical installation boundary
+
+Runtime discovery uses only `~/.pi/agent/swe-forge/`. `SWE_FORGE_ROOT` is an
+explicit development/test override; it never falls back to a project-local
+`.swe-forge/` tree. A root must contain regular-file targets for `SWE-FORGE.md`,
+`AGENTS.md`, and `VERSION`, plus a `.swe-forge` directory. The root is
+normalized through `realpath`; supported-root entries and role files may be
+symlinks, but their targets must be readable regular files. Role names are an
+allowlisted single path segment, so absolute paths, separators, drive syntax,
+`.`/`..`, and NUL bytes are rejected before resolution.
+
+Canonical role files must be non-empty and bounded. The fixed task, result, and
+review contracts must contain the fields this adapter validates. The concrete
+task and returned output are still treated as untrusted data: duplicate task
+IDs or `write_access` declarations conflict, unknown result statuses are
+rejected, and output truncated by the transport never becomes a successful
+result.
+
+These checks do not eliminate filesystem TOCTOU races or make a user-owned
+SWE-Forge installation trustworthy. The installation path is a user-level
+trust boundary and should not be replaced with a repository-controlled path.
+
+## Pi child boundary
+
+Each task uses the documented one-shot JSON CLI shape:
+
+- `--mode json --print --no-session`;
+- explicit `--model` and optional `--thinking`;
+- one closed built-in tool profile (`READ_ONLY` or `WRITABLE`);
+- `--no-extensions --no-skills --no-prompt-templates --no-themes`;
+- `--no-context-files --no-approve`; and
+- an explicit delegation-tool denylist plus a temporary 0600 system-prompt file.
+
+The child has no Pi extension, skill, prompt-template, theme, context-file, or
+session inheritance. `--no-approve` follows current Pi project-trust
+semantics for the child: untrusted project-local resources are not loaded in
+headless execution. This is an input-loading control, **not** an OS sandbox.
+Pi and its built-in tools retain the invoking user's filesystem permissions,
+and the child inherits the normal environment/configuration needed for model
+authentication. Do not run this adapter on an untrusted project without a
+real OS/container/VM boundary.
+
+JSONL parsing requires authoritative `message_end`/`agent_end` records. Plain
+stdout noise, malformed event lines, oversized event lines, stream errors,
+non-zero exits, missing assistant results, and truncated assistant output are
+reported as failed runtime evidence. Stderr is retained only as bounded
+process diagnostics; it is not treated as a worker result. A canonical
+`BLOCKED` or `FAILED` result remains data with that status and is never upgraded
+by the adapter.
+
+The parent signal terminates the child process group on POSIX and waits for
+process closure. Windows uses a direct kill and `taskkill` tree request where
+available. A child that deliberately escapes its process group or a process
+started outside this adapter's scheduler remains an operating-system
+responsibility; the runtime reports unresolved process termination rather than
+claiming isolation.
+
+## Checkout and trust semantics
+
+The in-process scheduler canonicalizes existing cwd symlinks and provides
+shared-read/exclusive-write leases. Writers block readers and other writers in
+the same normalized checkout, and canceled waiters are removed. The lock is
+process-local: it is not a worktree, OS lock, cross-process lock, or substitute
+for SWE-Forge `ISOLATED` execution. The runtime rejects missing/non-directory
+cwd values and passes the canonical real path to Pi, so changing a caller's
+relative or symlinked cwd cannot silently select a different checkout.
+
+`write_access` in a task is checked against the selected profile. Conflicting
+metadata fails closed. A writable child has the invoking user's normal write
+and shell permissions; `READ_ONLY` restricts model-visible Pi tools but cannot
+restrict arbitrary OS access outside those tools.
+
+## Package/API dependencies
+
+Pi core packages are peers and are not bundled. `typebox` is a runtime peer for
+the tool schema; `@earendil-works/pi-coding-agent` is the typed Pi extension
+peer. No community subagent runtime or other production dependency is needed.
+The package declares the tested Pi peer line rather than `*`, and the build,
+test, lint, and format checks use the existing TypeScript/Node toolchain
+without adding an unneeded formatter or linter dependency.
+
+When updating Pi or SWE-Forge, rerun the repository tests, package-install
+smoke test, and a fixture-backed child invocation. If a public flag, event
+shape, trust behavior, or canonical contract changes, update the compatibility
+policy and adapter deliberately; do not guess or silently widen the ranges.

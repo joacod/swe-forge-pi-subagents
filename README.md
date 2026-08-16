@@ -40,5 +40,6 @@ user's OS permissions. Calls using the same normalized `cwd` share the lock:
 read-only calls may overlap, while writable calls exclude readers and other
 writers until completion.
 
-See [`docs/architecture.md`](docs/architecture.md) for the technical spike,
-compatibility assumptions, and isolation semantics.
+See [`docs/architecture.md`](docs/architecture.md) for the technical spike
+and isolation semantics, and [`docs/compatibility.md`](docs/compatibility.md)
+for the tested Pi/SWE-Forge compatibility policy and trust boundary.

@@ -1,4 +1,4 @@
-import { readdir, readFile } from "node:fs/promises";
+import { readdir, readFile, stat } from "node:fs/promises";
 import { isAbsolute, join, posix, win32 } from "node:path";
 import { discoverSWEForgeInstallation } from "./discovery.js";
 import type { SWEForgeDiscoveryOptions, SWEForgeInstallation } from "./discovery.js";
@@ -8,6 +8,9 @@ const ROLE_FILE_SUFFIX = ".md";
 
 const CANONICAL_CONTRACT_NAMES = ["task", "result", "review"] as const;
 const EXPECTED_OUTPUT_CONTRACT_NAMES = ["result", "review"] as const;
+
+/** Keep canonical prompt material bounded before it reaches a child context. */
+export const MAX_CANONICAL_SOURCE_BYTES = 512 * 1024;
 
 const CONTRACT_FILE_NAMES: Record<CanonicalContractName, string> = {
 	task: "task.md",
@@ -29,8 +32,12 @@ export type SWEForgeRuntimeErrorCode =
 	| "ROLE_NOT_FOUND"
 	| "INVALID_CONTRACT_NAME"
 	| "CANONICAL_SOURCE_UNAVAILABLE"
+	| "CANONICAL_SOURCE_INVALID"
+	| "CANONICAL_SOURCE_TOO_LARGE"
 	| "EMPTY_TASK_CONTRACT"
+	| "TASK_CONTRACT_TOO_LARGE"
 	| "MISSING_TASK_ID"
+	| "CONFLICTING_TASK_ID"
 	| "INVALID_EXPECTED_TASK_ID"
 	| "INVALID_TASK_ACCESS"
 	| "ACCESS_CONFLICT"
@@ -39,9 +46,17 @@ export type SWEForgeRuntimeErrorCode =
 	| "MISSING_STATUS"
 	| "INVALID_STATUS"
 	| "MISSING_OUTPUT_STRUCTURE"
+	| "OUTPUT_TOO_LARGE"
 	| "TASK_ID_MISMATCH"
 	| "INVALID_TOOL_PROFILE"
-	| "MISSING_MODEL";
+	| "MISSING_MODEL"
+	| "INVALID_MODEL"
+	| "INVALID_THINKING_LEVEL"
+	| "INVALID_CWD"
+	| "OUTPUT_TRUNCATED"
+	| "NO_CANONICAL_RESULT"
+	| "EVENT_STREAM_INVALID"
+	| "PI_COMPATIBILITY_UNAVAILABLE";
 
 export interface SWEForgeRuntimeErrorOptions {
 	readonly status?: SWEForgeRuntimeErrorStatus;
@@ -178,8 +193,48 @@ function canonicalSourceError(path: string, cause: unknown): SWEForgeRuntimeErro
 	);
 }
 
+function canonicalSourceInvalid(path: string, reason: string): SWEForgeRuntimeError {
+	return new SWEForgeRuntimeError(
+		"CANONICAL_SOURCE_INVALID",
+		`Canonical SWE-Forge source is malformed at ${path}: ${reason}`,
+		{ status: "FAILED", details: { path, reason } },
+	);
+}
+
+function canonicalSourceTooLarge(path: string): SWEForgeRuntimeError {
+	return new SWEForgeRuntimeError(
+		"CANONICAL_SOURCE_TOO_LARGE",
+		`Canonical SWE-Forge source exceeds the ${MAX_CANONICAL_SOURCE_BYTES}-byte limit: ${path}`,
+		{ status: "FAILED", details: { path, maxBytes: MAX_CANONICAL_SOURCE_BYTES } },
+	);
+}
+
 function agentsPath(installation: SWEForgeInstallation): string {
 	return join(installation.paths.canonical, ROLE_DIRECTORY_NAME);
+}
+
+async function readCanonicalMarkdown(path: string): Promise<string> {
+	let info;
+	try {
+		info = await stat(path);
+	} catch (error) {
+		throw canonicalSourceError(path, error);
+	}
+	if (!info.isFile()) throw canonicalSourceInvalid(path, "expected a regular file");
+	if (info.size > MAX_CANONICAL_SOURCE_BYTES) throw canonicalSourceTooLarge(path);
+
+	let markdown: string;
+	try {
+		markdown = await readFile(path, "utf8");
+	} catch (error) {
+		throw canonicalSourceError(path, error);
+	}
+	if (Buffer.byteLength(markdown, "utf8") > MAX_CANONICAL_SOURCE_BYTES) {
+		throw canonicalSourceTooLarge(path);
+	}
+	if (markdown.trim().length === 0) throw canonicalSourceInvalid(path, "file is empty");
+	if (markdown.includes("\uFFFD")) throw canonicalSourceInvalid(path, "file is not valid UTF-8");
+	return markdown;
 }
 
 async function readRoleNamesAt(installation: SWEForgeInstallation): Promise<readonly string[]> {
@@ -191,18 +246,36 @@ async function readRoleNamesAt(installation: SWEForgeInstallation): Promise<read
 		throw canonicalSourceError(directory, error);
 	}
 
-	return entries
-		.filter((entry) => entry.isFile() && entry.name.endsWith(ROLE_FILE_SUFFIX))
-		.map((entry) => entry.name.slice(0, -ROLE_FILE_SUFFIX.length))
-		.filter(isSafeDiscoveredRoleName)
-		.sort((left, right) => left.localeCompare(right));
+	const roleNames: string[] = [];
+	for (const entry of entries) {
+		if (!entry.name.endsWith(ROLE_FILE_SUFFIX)) continue;
+		const roleName = entry.name.slice(0, -ROLE_FILE_SUFFIX.length);
+		if (!isSafeDiscoveredRoleName(roleName)) continue;
+		const path = join(directory, entry.name);
+		const markdown = await readCanonicalMarkdown(path);
+		void markdown;
+		roleNames.push(roleName);
+	}
+	if (roleNames.length === 0) throw canonicalSourceInvalid(directory, "no canonical role markdown files found");
+	return roleNames.sort((left, right) => left.localeCompare(right));
 }
 
-async function readCanonicalMarkdown(path: string): Promise<string> {
-	try {
-		return await readFile(path, "utf8");
-	} catch (error) {
-		throw canonicalSourceError(path, error);
+const REQUIRED_CANONICAL_CONTRACT_FIELDS: Record<CanonicalContractName, readonly string[]> = {
+	task: ["task_id", "objective"],
+	result: ["STATUS", "SUMMARY", "VALIDATION"],
+	review: ["status", "review_focus", "findings"],
+};
+
+function validateCanonicalContractMarkdown(
+	contractName: CanonicalContractName,
+	markdown: string,
+	path: string,
+): void {
+	const missing = REQUIRED_CANONICAL_CONTRACT_FIELDS[contractName].filter(
+		(field) => !parsedField(markdown, field).present,
+	);
+	if (missing.length > 0) {
+		throw canonicalSourceInvalid(path, `missing required field(s): ${missing.join(", ")}`);
 	}
 }
 
@@ -214,13 +287,11 @@ export async function discoverCanonicalRoleNames(
 	return readRoleNamesAt(installation);
 }
 
-/** Load one discovered canonical role by name. */
-export async function loadCanonicalRole(
+async function loadCanonicalRoleAt(
 	roleName: string,
-	options: SWEForgeDiscoveryOptions = {},
+	installation: SWEForgeInstallation,
 ): Promise<CanonicalRole> {
 	assertSafeRoleName(roleName);
-	const installation = await discoverSWEForgeInstallation(options);
 	const roleNames = await readRoleNamesAt(installation);
 	if (!roleNames.includes(roleName)) {
 		throw new SWEForgeRuntimeError(
@@ -234,15 +305,32 @@ export async function loadCanonicalRole(
 	return { name: roleName, markdown: await readCanonicalMarkdown(path), path };
 }
 
+/** Load one discovered canonical role by name. */
+export async function loadCanonicalRole(
+	roleName: string,
+	options: SWEForgeDiscoveryOptions = {},
+): Promise<CanonicalRole> {
+	assertSafeRoleName(roleName);
+	return loadCanonicalRoleAt(roleName, await discoverSWEForgeInstallation(options));
+}
+
+async function loadCanonicalContractAt(
+	contractName: CanonicalContractName,
+	installation: SWEForgeInstallation,
+): Promise<CanonicalContract> {
+	const path = join(installation.paths.canonical, "contracts", CONTRACT_FILE_NAMES[contractName]);
+	const markdown = await readCanonicalMarkdown(path);
+	validateCanonicalContractMarkdown(contractName, markdown, path);
+	return { name: contractName, markdown, path };
+}
+
 /** Load one of the fixed canonical contract files by its enum name. */
 export async function loadCanonicalContract(
 	contractName: CanonicalContractName,
 	options: SWEForgeDiscoveryOptions = {},
 ): Promise<CanonicalContract> {
 	if (!isCanonicalContractName(contractName)) invalidContractName(contractName);
-	const installation = await discoverSWEForgeInstallation(options);
-	const path = join(installation.paths.canonical, "contracts", CONTRACT_FILE_NAMES[contractName]);
-	return { name: contractName, markdown: await readCanonicalMarkdown(path), path };
+	return loadCanonicalContractAt(contractName, await discoverSWEForgeInstallation(options));
 }
 
 export function loadCanonicalTaskContract(
@@ -278,10 +366,24 @@ function ensureTaskContractString(taskContract: unknown): asserts taskContract i
 			"The canonical task contract must be non-empty.",
 		);
 	}
+	if (Buffer.byteLength(taskContract, "utf8") > MAX_CANONICAL_SOURCE_BYTES) {
+		throw new SWEForgeRuntimeError(
+			"TASK_CONTRACT_TOO_LARGE",
+			`The canonical task contract exceeds the ${MAX_CANONICAL_SOURCE_BYTES}-byte limit.`,
+			{ details: { maxBytes: MAX_CANONICAL_SOURCE_BYTES } },
+		);
+	}
+	if (taskContract.includes("\uFFFD")) {
+		throw new SWEForgeRuntimeError(
+			"CANONICAL_SOURCE_INVALID",
+			"The canonical task contract is not valid UTF-8.",
+		);
+	}
 }
 
 function fieldPattern(fieldName: string): RegExp {
-	return new RegExp(`^\\s*${fieldName.replace(/[.*+?^${}()|[\\]\\]/g, "\\$&")}\\s*:\\s*(.*?)\\s*$`, "imu");
+	const escaped = fieldName.replace(/[.*+?^${}()|[\\]\\]/g, "\\$&");
+	return new RegExp(`^\\s*${escaped}\\s*:\\s*(.*?)\\s*$`, "gimu");
 }
 
 interface ParsedField {
@@ -289,11 +391,8 @@ interface ParsedField {
 	readonly value?: string;
 }
 
-function parsedField(markdown: string, fieldName: string): ParsedField {
-	const match = markdown.match(fieldPattern(fieldName));
-	if (!match) return { present: false };
-
-	let value = match[1]?.trim() ?? "";
+function normalizeParsedFieldValue(rawValue: string | undefined): ParsedField {
+	let value = rawValue?.trim() ?? "";
 	if (
 		value.length >= 2 &&
 		((value.startsWith('"') && value.endsWith('"')) ||
@@ -305,6 +404,18 @@ function parsedField(markdown: string, fieldName: string): ParsedField {
 		return { present: true };
 	}
 	return { present: true, value };
+}
+
+function parsedFields(markdown: string, fieldName: string): ParsedField[] {
+	return [...markdown.matchAll(fieldPattern(fieldName))].map((match) => normalizeParsedFieldValue(match[1]));
+}
+
+function parsedField(markdown: string, fieldName: string): ParsedField {
+	return parsedFields(markdown, fieldName)[0] ?? { present: false };
+}
+
+function distinctConcreteValues(fields: readonly ParsedField[]): string[] {
+	return [...new Set(fields.flatMap((field) => (field.value === undefined ? [] : [field.value])))];
 }
 
 /** Identify a task identifier without translating the task contract. */
@@ -328,17 +439,29 @@ function normalizeWriteAccess(value: string): CanonicalWriteAccess | undefined {
  * remains compatible with reduced task contracts that omit this field.
  */
 function extractTaskWriteAccess(markdown: string): CanonicalWriteAccess | undefined {
-	const field = parsedField(markdown, "write_access");
-	if (!field.value) return undefined;
-	const access = normalizeWriteAccess(field.value);
-	if (!access) {
+	const fields = parsedFields(markdown, "write_access");
+	const accesses: CanonicalWriteAccess[] = [];
+	for (const field of fields) {
+		if (!field.value) continue;
+		const access = normalizeWriteAccess(field.value);
+		if (!access) {
+			throw new SWEForgeRuntimeError(
+				"INVALID_TASK_ACCESS",
+				`The task contract contains unsupported write_access metadata: ${JSON.stringify(field.value)}`,
+				{ details: { writeAccess: field.value } },
+			);
+		}
+		accesses.push(access);
+	}
+	const distinctAccesses = [...new Set(accesses)];
+	if (distinctAccesses.length > 1) {
 		throw new SWEForgeRuntimeError(
-			"INVALID_TASK_ACCESS",
-			`The task contract contains unsupported write_access metadata: ${JSON.stringify(field.value)}`,
-			{ details: { writeAccess: field.value } },
+			"ACCESS_CONFLICT",
+			`The task contract contains conflicting write_access declarations: ${distinctAccesses.join(", ")}.`,
+			{ details: { declarations: distinctAccesses } },
 		);
 	}
-	return access;
+	return distinctAccesses[0];
 }
 
 function ensureExpectedTaskId(taskId: string | undefined): string | undefined {
@@ -358,7 +481,15 @@ export function validateTaskContract(
 	options: { readonly requireTaskId?: boolean; readonly expectedWriteAccess?: CanonicalWriteAccess } = {},
 ): TaskContractValidation {
 	ensureTaskContractString(taskContract);
-	const taskId = extractTaskIdentifier(taskContract);
+	const taskIds = distinctConcreteValues(parsedFields(taskContract, "TASK_ID"));
+	if (taskIds.length > 1) {
+		throw new SWEForgeRuntimeError(
+			"CONFLICTING_TASK_ID",
+			`The task contract contains conflicting TASK_ID declarations: ${taskIds.join(", ")}.`,
+			{ details: { taskIds } },
+		);
+	}
+	const taskId = taskIds[0];
 	if (options.requireTaskId && !taskId) {
 		throw new SWEForgeRuntimeError(
 			"MISSING_TASK_ID",
@@ -405,8 +536,27 @@ export function validateCanonicalOutput(
 	if (typeof output !== "string" || output.trim().length === 0) {
 		throw new SWEForgeRuntimeError("EMPTY_OUTPUT", "The worker returned an empty canonical output.");
 	}
+	if (Buffer.byteLength(output, "utf8") > MAX_CANONICAL_SOURCE_BYTES) {
+		throw new SWEForgeRuntimeError(
+			"OUTPUT_TOO_LARGE",
+			`The worker output exceeds the ${MAX_CANONICAL_SOURCE_BYTES}-byte limit.`,
+			{ details: { maxBytes: MAX_CANONICAL_SOURCE_BYTES } },
+		);
+	}
+	if (output.includes("\uFFFD")) {
+		throw new SWEForgeRuntimeError("CANONICAL_SOURCE_INVALID", "The worker output is not valid UTF-8.");
+	}
 
-	const statusField = parsedField(output, "STATUS");
+	const statusFields = parsedFields(output, "STATUS");
+	const statusValues = distinctConcreteValues(statusFields);
+	if (statusValues.length > 1) {
+		throw new SWEForgeRuntimeError(
+			"INVALID_STATUS",
+			`The ${expectedOutputContract} output contains conflicting STATUS declarations: ${statusValues.join(", ")}.`,
+			{ details: { statuses: statusValues, expectedOutputContract } },
+		);
+	}
+	const statusField = statusFields[0] ?? { present: false };
 	if (!statusField.value) {
 		throw new SWEForgeRuntimeError(
 			statusField.present ? "INVALID_STATUS" : "MISSING_STATUS",
@@ -421,6 +571,16 @@ export function validateCanonicalOutput(
 			{ details: { status: statusField.value, expectedOutputContract } },
 		);
 	}
+	const allowedStatuses = expectedOutputContract === "result"
+		? ["DONE", "BLOCKED", "FAILED"]
+		: ["PASS", "CHANGES_REQUIRED"];
+	if (!allowedStatuses.includes(status.toUpperCase())) {
+		throw new SWEForgeRuntimeError(
+			"INVALID_STATUS",
+			`The ${expectedOutputContract} output contains unsupported STATUS ${JSON.stringify(status)}.`,
+			{ details: { status, expectedOutputContract, allowedStatuses } },
+		);
+	}
 
 	const missingStructure = outputStructureFields(expectedOutputContract).filter(
 		(field) => !parsedField(output, field).present,
@@ -433,7 +593,15 @@ export function validateCanonicalOutput(
 		);
 	}
 
-	const returnedTaskId = extractTaskIdentifier(output);
+	const returnedTaskIds = distinctConcreteValues(parsedFields(output, "TASK_ID"));
+	if (returnedTaskIds.length > 1) {
+		throw new SWEForgeRuntimeError(
+			"CONFLICTING_TASK_ID",
+			`The canonical output contains conflicting TASK_ID declarations: ${returnedTaskIds.join(", ")}.`,
+			{ details: { taskIds: returnedTaskIds } },
+		);
+	}
+	const returnedTaskId = returnedTaskIds[0];
 	const expectedTaskId = ensureExpectedTaskId(options.taskId);
 	const requireTaskId = options.requireTaskId ?? expectedOutputContract === "result";
 	if (requireTaskId && !returnedTaskId) {
@@ -468,8 +636,9 @@ export async function composeRuntimePrompt(input: RuntimePromptInput): Promise<s
 			`Unsupported expected output contract: ${JSON.stringify(input.expectedOutputContract)}`,
 		);
 	}
-	const role = await loadCanonicalRole(input.roleName, input.discovery);
-	const outputContract = await loadExpectedOutputContract(input.expectedOutputContract, input.discovery);
+	const installation = await discoverSWEForgeInstallation(input.discovery);
+	const role = await loadCanonicalRoleAt(input.roleName, installation);
+	const outputContract = await loadCanonicalContractAt(input.expectedOutputContract, installation);
 
 	return [
 		"=== CANONICAL ROLE ===",
