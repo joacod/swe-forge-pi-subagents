@@ -28,6 +28,7 @@ try {
 			join(testDirectory, "discovery.test.js"),
 			join(testDirectory, "extension.test.js"),
 			join(testDirectory, "projection.test.js"),
+			join(testDirectory, "runtime.test.js"),
 		];
 		const test = spawnSync(process.execPath, ["--test", ...testFiles], { cwd: root, stdio: "inherit" });
 		process.exitCode = test.status ?? 1;

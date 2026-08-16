@@ -1,10 +1,10 @@
 # swe-forge-pi-subagents
 
 Minimal Pi package primitive for SWE Forge's canonical `SUBAGENTS` topology.
-It discovers the installed SWE-Forge support root and projects canonical roles
-and contracts into one transient runtime prompt; child execution remains
-deferred. It does not implement orchestration, workflows, or filesystem
-isolation.
+It discovers the installed SWE-Forge support root, projects canonical roles and
+contracts into one transient runtime prompt, and executes exactly one bounded
+child task in a fresh Pi JSON subprocess. It does not implement orchestration,
+workflows, or filesystem isolation.
 
 ## Architecture
 
@@ -25,7 +25,12 @@ The public projection helpers are exported from `src/index.ts`: discover role
 names with `discoverCanonicalRoleNames`, load roles and the fixed `task`,
 `result`, and `review` contracts, compose a prompt with
 `composeRuntimePrompt`, and validate lightweight task/output boundaries with
-`validateTaskContract` and `validateCanonicalOutput`.
+`validateTaskContract` and `validateCanonicalOutput`. The single-task runtime
+is exposed through `executeSWEForgeTask` (also `runSWEForgeTask`) and provides
+only `READ_ONLY` (`read`, `grep`, `find`, `ls`) and `WRITABLE` (those tools plus
+`edit`, `write`, `bash`) profiles. Profiles restrict model-visible Pi tools;
+they are not an operating-system sandbox, so the child retains the invoking
+user's OS permissions.
 
 See [`docs/architecture.md`](docs/architecture.md) for the technical spike,
 compatibility assumptions, and isolation semantics.

@@ -36,7 +36,9 @@ export type SWEForgeRuntimeErrorCode =
 	| "MISSING_STATUS"
 	| "INVALID_STATUS"
 	| "MISSING_OUTPUT_STRUCTURE"
-	| "TASK_ID_MISMATCH";
+	| "TASK_ID_MISMATCH"
+	| "INVALID_TOOL_PROFILE"
+	| "MISSING_MODEL";
 
 export interface SWEForgeRuntimeErrorOptions {
 	readonly status?: SWEForgeRuntimeErrorStatus;
