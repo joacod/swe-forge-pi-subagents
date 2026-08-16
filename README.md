@@ -1,45 +1,316 @@
 # swe-forge-pi-subagents
 
-Minimal Pi package primitive for SWE Forge's canonical `SUBAGENTS` topology.
-It discovers the installed SWE-Forge support root, projects canonical roles and
-contracts into one transient runtime prompt, and executes exactly one bounded
-child task in a fresh Pi JSON subprocess. It does not implement orchestration,
-workflows, or filesystem isolation. Child calls use a local in-memory
-per-checkout shared-read/exclusive-write lock; the lock is not a worktree or
-general task scheduler.
+Optional Pi package that gives SWE-Forge's `SUBAGENTS` topology one bounded
+child-agent execution primitive. It discovers the installed canonical
+SWE-Forge support root, loads a selected role and output contract without
+copying them, and runs one fresh Pi JSON subprocess in the requested checkout.
+The public Pi tool is `swe_forge_subagent`.
 
-## Architecture
+## What this package is
 
-- **SWE-Forge** is the orchestration layer and source of truth.
-- **This package** is an optional Pi execution primitive for one bounded child-agent context.
-- **Pi** is the harness/runtime that loads the extension.
+This is an adapter/runtime boundary, not a second SWE-Forge implementation.
+The canonical workflow, roles, contracts, policies, topology decision, and
+delivery process remain in SWE-Forge.
 
-The package discovers the canonical SWE-Forge support root at
-`~/.pi/agent/swe-forge/` and validates `SWE-FORGE.md`, `AGENTS.md`,
-`.swe-forge/`, and `VERSION` without copying or modifying the installation.
-For development and tests only, set `SWE_FORGE_ROOT` to an alternate root;
-invalid overrides do not fall back to another location. Runtime projection
-loaders rediscover that root on each invocation, accept role names only, and
-return canonical markdown without generating `.pi/agents/*.md` files. The
-runtime then launches one child process with the selected access profile.
+## What this package is not
 
-The public projection helpers are exported from `src/index.ts`: discover role
-names with `discoverCanonicalRoleNames`, load roles and the fixed `task`,
-`result`, and `review` contracts, compose a prompt with
-`composeRuntimePrompt`, and validate lightweight task/output boundaries with
-`validateTaskContract` and `validateCanonicalOutput`. The Pi tool
-`swe_forge_subagent` exposes only `action: "capabilities"` and
-`action: "run"`; capabilities are machine-readable, while run returns the
-canonical worker result as its primary content and keeps process diagnostics
-separate. The single-task runtime is exposed through `executeSWEForgeTask`
-(also `runSWEForgeTask`) and provides
-only `READ_ONLY` (`read`, `grep`, `find`, `ls`) and `WRITABLE` (those tools plus
-`edit`, `write`, `bash`) profiles. Profiles restrict model-visible Pi tools;
-they are not an operating-system sandbox, so the child retains the invoking
-user's OS permissions. Calls using the same normalized `cwd` share the lock:
-read-only calls may overlap, while writable calls exclude readers and other
-writers until completion.
+It is not a workflow engine, planner, DAG/task database, orchestrator, provider
+selector, worktree manager, PR/delivery tool, background-worker system, or
+recursive agent framework. It does not define roles, contracts, policies, or
+`ISOLATED` execution. It does not create worktrees, choose a topology, select a
+model/provider, commit, push, open a PR, or merge. The small in-process lock
+only enforces the child-access rule described below; it is not a general task
+scheduler.
 
-See [`docs/architecture.md`](docs/architecture.md) for the technical spike
-and isolation semantics, and [`docs/compatibility.md`](docs/compatibility.md)
-for the tested Pi/SWE-Forge compatibility policy and trust boundary.
+## Relationship to SWE-Forge
+
+SWE-Forge is the source of truth and must already be installed before this
+package can run. The package reads the live canonical installation at
+`~/.pi/agent/swe-forge/`, including `SWE-FORGE.md`, `AGENTS.md`, `VERSION`, and
+`.swe-forge/`. It does not install, copy, bundle, translate, or redefine those
+sources. The canonical workflow may feature-detect this package when it has
+selected or is considering `SUBAGENTS`; when it is absent, SWE-Forge continues
+with its normal SOLO/sequential fallback. This repository does not modify the
+main adapter or wire that optional path in automatically.
+
+This package must not be used as a replacement for the main SWE-Forge
+repository. The eventual adapter integration is documented in
+[`docs/swe-forge-integration.md`](docs/swe-forge-integration.md).
+
+## Relationship to Pi
+
+Pi loads this package as an extension from its package settings. The extension
+registers one tool, `swe_forge_subagent`, and uses Pi's documented one-shot JSON
+CLI to create a separate child process/context. Pi supplies the host runtime,
+model/auth configuration, built-in tools, package loading, and process
+permissions; this package supplies only the bounded child boundary and
+canonical-source projection.
+
+Installing the package does **not** activate SWE-Forge. SWE-Forge remains
+explicitly invoked, for example:
+
+```text
+/swe-forge <ticket>
+/swe-forge pr <ticket>
+```
+
+The extension does not intercept `/swe-forge`, select `SOLO`/`SUBAGENTS`/
+`ISOLATED`, or delegate work on its own. Loading the package makes its
+capability available to Pi; the canonical SWE-Forge adapter decides whether to
+use it.
+
+## Installation
+
+Install the package with Pi's current package mechanism. A published release
+can be installed globally with:
+
+```bash
+pi install npm:swe-forge-pi-subagents@0.1.0
+```
+
+For a project-local Pi setting, add `-l`:
+
+```bash
+pi install -l npm:swe-forge-pi-subagents@0.1.0
+```
+
+If the release is being consumed directly from Git, Pi accepts the repository
+source (a tag or commit is preferable for reproducibility):
+
+```bash
+pi install git:github.com/joacod/swe-forge-pi-subagents
+pi install git:github.com/joacod/swe-forge-pi-subagents@<tag-or-commit>
+```
+
+For local development, Pi also accepts a package directory:
+
+```bash
+pi install /absolute/path/to/swe-forge-pi-subagents
+```
+
+Review extension source before installing it. Pi packages and extensions run
+with the invoking user's full system permissions. Installation only adds this
+optional Pi capability; it does **not** install SWE-Forge itself.
+
+## Requirement: install SWE-Forge first
+
+Install the main SWE-Forge package/repository using its own installation
+instructions before installing this extension. At runtime, the canonical
+support root must be available at:
+
+```text
+~/.pi/agent/swe-forge/
+├── AGENTS.md
+├── SWE-FORGE.md
+├── VERSION
+└── .swe-forge/
+```
+
+The package validates that root and the supported SWE-Forge `0.1.x` line. A
+project-local `.swe-forge/` directory is not a substitute, and this project
+does not modify the main SWE-Forge repository.
+
+## `swe_forge_subagent` capabilities
+
+The tool exposes exactly two actions:
+
+- `action: "capabilities"` returns machine-readable observed support, the
+  discovered canonical roles, compatibility errors, the closed tool profiles,
+  read-only overlap support, and the fact that writable concurrency and nested
+  delegation are unsupported.
+- `action: "run"` executes exactly one bounded task. The caller supplies a
+  discovered canonical role name, a canonical task contract, either the
+  `result` or `review` output contract, and `READ_ONLY` or `WRITABLE`.
+
+A run loads the selected role and expected output contract live, composes one
+explicit prompt, starts one fresh Pi JSON subprocess, returns canonical output
+separately from bounded runtime diagnostics, and validates the recognizable
+canonical result shape. The caller remains responsible for task decomposition,
+workflow interpretation, evidence, review, integration, and acceptance.
+
+The capability surface intentionally has no arrays of tasks, chains, queues,
+retry policy, persistence, resume/steer API, worktree API, delivery API, or
+nested delegation.
+
+## READ_ONLY vs WRITABLE semantics
+
+| Profile | Model-visible Pi tools | Semantics |
+| --- | --- | --- |
+| `READ_ONLY` | `read`, `grep`, `find`, `ls` | May inspect the checkout; no edit, write, or shell tool. |
+| `WRITABLE` | The read-only tools plus `edit`, `write`, `bash` | May modify files and run commands with the invoking user's normal OS permissions. |
+
+A canonical task's concrete `write_access` metadata must agree with the
+selected profile when it is present. Profiles restrict Pi tools exposed to the
+child; they are not an operating-system sandbox. In particular, `WRITABLE`
+does not grant extra permissions and `READ_ONLY` is not a guarantee against
+other processes modifying the filesystem.
+
+## Context isolation vs filesystem isolation
+
+The child has a separate Pi process, `--no-session` conversation, prompt
+material, and model context. It does not receive the parent's conversation or
+extension/skill/template/theme/context-file loading. Its process working
+directory is still the caller's normalized checkout. Filesystem state is
+therefore shared by design.
+
+This package does not provide worktrees, containers, VMs, or an OS sandbox.
+SWE-Forge `ISOLATED` execution and worktree lifecycle remain outside this
+package.
+
+## Parallel readers / exclusive writer rule
+
+For calls made through the same package runtime, the normalized checkout has a
+local shared-read/exclusive-write lock:
+
+- multiple `READ_ONLY` children for one checkout may overlap;
+- a `WRITABLE` child waits for active readers and other writers, then excludes
+  readers until it finishes; and
+- readers arriving behind a queued writer wait rather than starving it.
+
+The lock is process-local and in-memory. It does not coordinate separate Pi
+processes, package instances, worktrees, or machines, and it does not authorize
+concurrent writable work. SWE-Forge must keep writable `SUBAGENTS` work
+sequential in a shared checkout; concurrent writable work requires its own
+canonical `ISOLATED` workflow.
+
+## Security model
+
+- **Trust:** installing a Pi package runs extension code with full user
+  permissions. Inspect and trust both this package and the installed canonical
+  SWE-Forge support root.
+- **Resource boundary:** child launch disables extensions, skills, prompt
+  templates, themes, context-file discovery, session persistence, and the
+  delegation tools. The explicit canonical prompt is the only projected
+  role/task material.
+- **Filesystem boundary:** the child uses the active checkout and inherits the
+  user's OS permissions. This is not a sandbox; use a real OS/container/VM
+  boundary for untrusted projects.
+- **Credentials:** the child inherits the normal process environment and Pi
+  configuration used for authentication. Runtime-only in-memory provider
+  registrations or keys are not promised across the subprocess boundary.
+- **Temporary material:** the prompt file is created with restrictive `0600`
+  permissions and removed after the child exits. Secrets are not copied into
+  the prompt or diagnostics.
+- **Output:** child output is untrusted model data. Canonical shape checks do
+  not turn it into Git, test, or delivery evidence; SWE-Forge must validate
+  evidence independently.
+- **Cancellation and cleanup:** cancellation terminates the child on a
+  best-effort platform-appropriate process boundary and reports `aborted`; it
+  is never upgraded to success.
+
+## Canonical role loading
+
+Every runtime invocation rediscovers the canonical root. The default is exactly
+`~/.pi/agent/swe-forge/`. `SWE_FORGE_ROOT` is an explicit development/test
+override; it is not a fallback and is never resolved from a project-local
+`.swe-forge/` tree.
+
+Role selection accepts a discovered single-segment role name, not a path. The
+loader validates the support-root shape and SWE-Forge version, discovers
+`.swe-forge/agents/*.md` role names, rereads the selected role on each call,
+and loads the fixed `task.md`, `result.md`, or `review.md` contract as needed.
+Canonical markdown is projected as-is. No role definitions or contract copies
+are bundled in this package.
+
+## Compatibility
+
+| Component | v1 support |
+| --- | --- |
+| Node.js | `>=22.19.0` |
+| Pi CLI/package | `>=0.84.1 <0.85.0` |
+| SWE-Forge | `0.1.x` (minimum tested `0.1.0-alpha.1`) |
+| Runtime dependencies | Pi core packages and `typebox` as peers; no production community subagent dependency |
+| Exercised platform | macOS with Node 24.15.0; Linux and Windows are portability targets, not fully exercised release claims |
+
+The child probes a real Pi CLI version and fails closed when it cannot verify
+the supported line. Fixture/injected commands used by tests are an explicit
+test seam and do not widen the runtime compatibility claim. See
+[`docs/compatibility.md`](docs/compatibility.md) for trust and boundary details.
+
+## Troubleshooting
+
+**The tool is missing.** Check `pi list`, confirm the package is enabled in the
+intended global or project settings (`pi config` / `pi config -l`), restart Pi
+or run `/reload`, and verify that the installed package exposes
+`src/index.ts` through its `pi.extensions` manifest. `pi -e /path/to/src/index.ts`
+is useful for a one-run development check.
+
+**SWE-Forge is reported as not installed or incomplete.** Install SWE-Forge
+separately and check `~/.pi/agent/swe-forge/` for `AGENTS.md`, `SWE-FORGE.md`,
+`VERSION`, and `.swe-forge/agents` plus `.swe-forge/contracts`. Do not add a
+project-local support tree as a workaround.
+
+**A version is unsupported.** Use a Pi release in `>=0.84.1 <0.85.0` and a
+SWE-Forge installation in `0.1.x`. Update this package deliberately when either
+public boundary changes; it does not silently widen compatibility.
+
+**The child cannot authenticate or run.** Pass/retain an explicit
+`provider/model` selected by the caller, confirm Pi can authenticate in a
+normal session, and remember that in-memory extension-only provider/auth state
+does not automatically cross the child process boundary.
+
+**A task is rejected for access or output.** Check that `write_access` agrees
+with `READ_ONLY`/`WRITABLE`, that the role name is canonical, and that the
+child returns the requested canonical `result` or `review` structure with its
+expected task ID. A `BLOCKED`, `FAILED`, malformed, or truncated result is not
+success.
+
+**Concurrent calls behave as if queued.** That is expected for a writer in the
+same normalized checkout. Only readers overlap; the process-local lock is not
+cross-process isolation.
+
+## Uninstall
+
+Remove the same package source from the Pi scope where it was installed:
+
+```bash
+# Global npm install
+pi remove npm:swe-forge-pi-subagents
+
+# Project-local install
+pi remove -l npm:swe-forge-pi-subagents
+
+# Git install (use the exact source/ref shown by `pi list`)
+pi remove git:github.com/joacod/swe-forge-pi-subagents
+```
+
+For a Git or local-path install, pass the matching source recorded by `pi
+list`. Removing this package does not remove SWE-Forge, Pi, credentials,
+sessions, or other Pi packages.
+
+## Development and testing
+
+This repository is the optional extension only; keep the main SWE-Forge
+repository separate. From this checkout:
+
+```bash
+npm install
+npm test
+npm run test:unit
+npm run test:integration
+npm run typecheck
+npm run lint
+npm run format:check
+npm run build
+```
+
+Tests use temporary fake SWE-Forge installations and injected Pi commands.
+For development-only canonical-root experiments, set `SWE_FORGE_ROOT` to an
+explicit fixture/support root; invalid overrides do not fall back elsewhere.
+The package's production behavior always reads the canonical user-level root.
+
+The scope review for v1 found no workflow engine, planner/DAG, provider
+selector, worktree manager, delivery/PR implementation, background worker
+system, bundled role registry, task database, or recursive delegation in the
+runtime. The checkout lock, canonical projection, and one-child subprocess
+are the only coordination/runtime boundaries retained because they directly
+implement the documented capability.
+
+Further technical detail:
+
+- [`docs/architecture.md`](docs/architecture.md) — implementation boundary and
+  isolation semantics
+- [`docs/compatibility.md`](docs/compatibility.md) — tested compatibility and
+  trust boundary
+- [`docs/swe-forge-integration.md`](docs/swe-forge-integration.md) — minimal
+  contract for the eventual main-repository adapter change
