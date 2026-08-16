@@ -363,6 +363,7 @@ test("recognizes only the tested Pi compatibility line", () => {
 	assert.equal(isSupportedPiVersion("0.84.1"), true);
 	assert.equal(isSupportedPiVersion("0.84.2"), true);
 	assert.equal(isSupportedPiVersion("0.85.0"), false);
+	assert.equal(isSupportedPiVersion("0.84.1-beta.1"), false);
 	assert.equal(isSupportedPiVersion("not-a-version"), false);
 });
 

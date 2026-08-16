@@ -189,6 +189,9 @@ async function validateEntries(root: string): Promise<{ missing: string[]; inval
 			const info = await stat(path);
 			const correctType = entry.kind === "file" ? info.isFile() : info.isDirectory();
 			if (!correctType) invalid.push(entry.name);
+			else if (entry.kind === "file" && entry.name !== "VERSION" && info.size === 0) {
+				invalid.push(`${entry.name} (empty)`);
+			}
 		} catch (error) {
 			const code = errorCode(error);
 			if (code === "ENOENT" || code === "ENOTDIR") missing.push(entry.name);

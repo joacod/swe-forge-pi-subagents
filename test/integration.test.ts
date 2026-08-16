@@ -41,6 +41,19 @@ test("integrates against a copied tiny fake SWE-Forge installation", async () =>
 	assert.deepEqual(capabilities.compatibilityErrors, []);
 });
 
+test("fails clearly when a fake installation has no canonical roles", async () => {
+	const root = await copyFakeSWEForgeInstallation();
+	temporaryPaths.push(root);
+	await Promise.all(
+		["reader.md", "writer.md"].map((name) => rm(join(root, ".swe-forge", "agents", name), { force: true })),
+	);
+
+	await assert.rejects(
+		discoverCanonicalRoleNames(discovery(root)),
+		(error: unknown) => error instanceof SWEForgeRuntimeError && error.code === "CANONICAL_SOURCE_INVALID",
+	);
+});
+
 test("fails clearly when a fake canonical contract is malformed", async () => {
 	const root = await copyFakeSWEForgeInstallation();
 	temporaryPaths.push(root);

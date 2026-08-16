@@ -256,6 +256,7 @@ async function readRoleNamesAt(installation: SWEForgeInstallation): Promise<read
 		void markdown;
 		roleNames.push(roleName);
 	}
+	if (roleNames.length === 0) throw canonicalSourceInvalid(directory, "no canonical role markdown files found");
 	return roleNames.sort((left, right) => left.localeCompare(right));
 }
 

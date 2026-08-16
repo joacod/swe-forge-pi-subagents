@@ -592,13 +592,13 @@ async function canonicalizeCwd(input: string | undefined): Promise<string> {
 	}
 }
 
-const PI_VERSION_PATTERN = /(?:^|\s)(\d+)\.(\d+)\.(\d+)(?:-[0-9A-Za-z.-]+)?(?:\s|$)/u;
+const PI_VERSION_PATTERN = /(?:^|\s)(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\s|$)/u;
 
 /** Check the Pi CLI version against the documented public CLI boundary. */
 export function isSupportedPiVersion(version: string): boolean {
 	const match = PI_VERSION_PATTERN.exec(version.trim());
 	if (!match) return false;
-	return Number(match[1]) === 0 && Number(match[2]) === 84 && Number(match[3]) >= 1;
+	return match[4] === undefined && Number(match[1]) === 0 && Number(match[2]) === 84 && Number(match[3]) >= 1;
 }
 
 interface PiProbeResult {
