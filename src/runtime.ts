@@ -666,6 +666,7 @@ export async function executeSWEForgeTask(options: SWEForgeTaskOptions): Promise
 
 	const taskValidation = validateTaskContract(options.taskContract, {
 		requireTaskId: options.expectedOutputContract === "result",
+		expectedWriteAccess: options.profile,
 	});
 	const prompt = await composeRuntimePrompt({
 		roleName: options.roleName,

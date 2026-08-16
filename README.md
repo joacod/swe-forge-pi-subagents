@@ -27,8 +27,12 @@ The public projection helpers are exported from `src/index.ts`: discover role
 names with `discoverCanonicalRoleNames`, load roles and the fixed `task`,
 `result`, and `review` contracts, compose a prompt with
 `composeRuntimePrompt`, and validate lightweight task/output boundaries with
-`validateTaskContract` and `validateCanonicalOutput`. The single-task runtime
-is exposed through `executeSWEForgeTask` (also `runSWEForgeTask`) and provides
+`validateTaskContract` and `validateCanonicalOutput`. The Pi tool
+`swe_forge_subagent` exposes only `action: "capabilities"` and
+`action: "run"`; capabilities are machine-readable, while run returns the
+canonical worker result as its primary content and keeps process diagnostics
+separate. The single-task runtime is exposed through `executeSWEForgeTask`
+(also `runSWEForgeTask`) and provides
 only `READ_ONLY` (`read`, `grep`, `find`, `ls`) and `WRITABLE` (those tools plus
 `edit`, `write`, `bash`) profiles. Profiles restrict model-visible Pi tools;
 they are not an operating-system sandbox, so the child retains the invoking

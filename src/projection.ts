@@ -24,6 +24,7 @@ export type ExpectedOutputContract = (typeof EXPECTED_OUTPUT_CONTRACT_NAMES)[num
 export type SWEForgeRuntimeErrorStatus = "BLOCKED" | "FAILED";
 
 export type SWEForgeRuntimeErrorCode =
+	| "INVALID_ACTION"
 	| "INVALID_ROLE_NAME"
 	| "ROLE_NOT_FOUND"
 	| "INVALID_CONTRACT_NAME"
@@ -31,6 +32,8 @@ export type SWEForgeRuntimeErrorCode =
 	| "EMPTY_TASK_CONTRACT"
 	| "MISSING_TASK_ID"
 	| "INVALID_EXPECTED_TASK_ID"
+	| "INVALID_TASK_ACCESS"
+	| "ACCESS_CONFLICT"
 	| "EMPTY_OUTPUT"
 	| "INVALID_EXPECTED_OUTPUT_CONTRACT"
 	| "MISSING_STATUS"
@@ -94,9 +97,14 @@ export interface RuntimePromptInput {
 	readonly discovery?: SWEForgeDiscoveryOptions;
 }
 
+/** The two access levels understood by the child runtime. */
+export type CanonicalWriteAccess = "READ_ONLY" | "WRITABLE";
+
 export interface TaskContractValidation {
 	readonly valid: true;
 	readonly taskId?: string;
+	/** Concrete canonical `write_access` metadata, when the task supplies it. */
+	readonly writeAccess?: CanonicalWriteAccess;
 }
 
 export interface CanonicalOutputValidation {
@@ -305,6 +313,34 @@ export function extractTaskIdentifier(markdown: string): string | undefined {
 	return parsedField(markdown, "TASK_ID").value;
 }
 
+function normalizeWriteAccess(value: string): CanonicalWriteAccess | undefined {
+	const normalized = value.trim().toLowerCase().replace(/[\s_]+/gu, "-");
+	if (["read", "read-only", "readonly", "none"].includes(normalized)) return "READ_ONLY";
+	if (["write", "writable", "read-write", "readwrite", "write-access"].includes(normalized)) {
+		return "WRITABLE";
+	}
+	return undefined;
+}
+
+/**
+ * Read the concrete canonical `write_access` metadata without rewriting the
+ * supplied contract. Placeholder values are treated as absent so the runtime
+ * remains compatible with reduced task contracts that omit this field.
+ */
+function extractTaskWriteAccess(markdown: string): CanonicalWriteAccess | undefined {
+	const field = parsedField(markdown, "write_access");
+	if (!field.value) return undefined;
+	const access = normalizeWriteAccess(field.value);
+	if (!access) {
+		throw new SWEForgeRuntimeError(
+			"INVALID_TASK_ACCESS",
+			`The task contract contains unsupported write_access metadata: ${JSON.stringify(field.value)}`,
+			{ details: { writeAccess: field.value } },
+		);
+	}
+	return access;
+}
+
 function ensureExpectedTaskId(taskId: string | undefined): string | undefined {
 	if (taskId === undefined) return undefined;
 	if (typeof taskId !== "string" || taskId.trim().length === 0 || /^<[^>]+>$/u.test(taskId.trim())) {
@@ -319,7 +355,7 @@ function ensureExpectedTaskId(taskId: string | undefined): string | undefined {
 /** Validate the minimum task-contract properties required by the runtime. */
 export function validateTaskContract(
 	taskContract: string,
-	options: { readonly requireTaskId?: boolean } = {},
+	options: { readonly requireTaskId?: boolean; readonly expectedWriteAccess?: CanonicalWriteAccess } = {},
 ): TaskContractValidation {
 	ensureTaskContractString(taskContract);
 	const taskId = extractTaskIdentifier(taskContract);
@@ -329,7 +365,21 @@ export function validateTaskContract(
 			"The task contract does not contain an identifiable TASK_ID.",
 		);
 	}
-	return { valid: true, ...(taskId === undefined ? {} : { taskId }) };
+
+	const writeAccess = extractTaskWriteAccess(taskContract);
+	if (writeAccess !== undefined && options.expectedWriteAccess !== undefined && writeAccess !== options.expectedWriteAccess) {
+		throw new SWEForgeRuntimeError(
+			"ACCESS_CONFLICT",
+			`Task contract requires ${writeAccess}; invocation requested ${options.expectedWriteAccess}.`,
+			{ details: { taskWriteAccess: writeAccess, requestedWriteAccess: options.expectedWriteAccess } },
+		);
+	}
+
+	return {
+		valid: true,
+		...(taskId === undefined ? {} : { taskId }),
+		...(writeAccess === undefined ? {} : { writeAccess }),
+	};
 }
 
 function outputStructureFields(expectedOutputContract: ExpectedOutputContract): readonly string[] {
