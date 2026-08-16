@@ -1,7 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { mkdtemp, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { StringDecoder } from "node:string_decoder";
 import {
@@ -13,6 +13,7 @@ import type { SWEForgeDiscoveryOptions } from "./discovery.js";
 import {
 	composeRuntimePrompt,
 	extractTaskIdentifier,
+	loadCanonicalTaskContract,
 	SWEForgeRuntimeError,
 	type CanonicalOutputValidation,
 	type ExpectedOutputContract,
@@ -47,6 +48,17 @@ export const DELEGATION_TOOL_NAMES = ["subagent", "swe_forge_subagent"] as const
 /** Keep diagnostics bounded; the final worker output is bounded separately. */
 export const MAX_STDERR_BYTES = 16 * 1024;
 export const MAX_WORKER_OUTPUT_BYTES = 256 * 1024;
+export const MAX_EVENT_LINE_BYTES = 512 * 1024;
+
+/**
+ * Pi's CLI/event boundary is tested against this compatibility line. A child
+ * launched through an injected command is a fixture seam and is not probed.
+ */
+export const PI_COMPATIBILITY_POLICY = {
+	range: ">=0.84.1 <0.85.0",
+	minimum: "0.84.1",
+	maximumExclusive: "0.85.0",
+} as const;
 
 export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 export type ChildAgentStatus = "completed" | "failed" | "aborted";
@@ -87,6 +99,8 @@ export interface ChildAgentResult {
 	readonly stopReason?: string;
 	readonly errorMessage?: string;
 	readonly outputTruncated?: boolean;
+	readonly eventStreamError?: string;
+	readonly piVersion?: string;
 }
 
 export interface ChildInvocation {
@@ -162,6 +176,7 @@ interface ChildState {
 	errorMessage?: string;
 	agentEnded: boolean;
 	outputTruncated: boolean;
+	eventStreamError?: string;
 }
 
 function isRecord(value: unknown): value is JsonObject {
@@ -213,6 +228,27 @@ function validateTools(tools: readonly string[]): BuiltinTool[] {
 
 function isChildToolProfile(value: unknown): value is ChildToolProfile {
 	return value === "READ_ONLY" || value === "WRITABLE";
+}
+
+const THINKING_LEVELS: readonly ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+
+function validateModelIdentifier(model: unknown): asserts model is string {
+	if (typeof model !== "string" || model.trim().length === 0 || model.includes("\0")) {
+		throw new SWEForgeRuntimeError(
+			"INVALID_MODEL",
+			`Pi child model must be a non-empty provider/model identifier: ${JSON.stringify(model)}`,
+		);
+	}
+}
+
+function validateThinkingLevel(level: unknown): asserts level is ThinkingLevel {
+	if (level === undefined) return;
+	if (typeof level !== "string" || !(THINKING_LEVELS as readonly string[]).includes(level)) {
+		throw new SWEForgeRuntimeError(
+			"INVALID_THINKING_LEVEL",
+			`Unsupported Pi thinking level: ${JSON.stringify(level)}`,
+		);
+	}
 }
 
 /** Resolve one of the two closed capability profiles. */
@@ -275,6 +311,8 @@ function resolveTools(options: BuildChildArgsOptions): BuiltinTool[] {
  */
 export function buildChildArgs(options: BuildChildArgsOptions): string[] {
 	const tools = resolveTools(options);
+	if (options.model !== undefined) validateModelIdentifier(options.model);
+	validateThinkingLevel(options.thinkingLevel);
 	const args = [
 		"--mode",
 		"json",
@@ -285,6 +323,7 @@ export function buildChildArgs(options: BuildChildArgsOptions): string[] {
 		"--no-prompt-templates",
 		"--no-themes",
 		"--no-context-files",
+		"--no-approve",
 		"--exclude-tools",
 		DELEGATION_TOOL_NAMES.join(","),
 	];
@@ -308,8 +347,9 @@ export function resolvePiInvocation(): ChildInvocation {
 	const currentScript = process.argv[1];
 	const isPiProcess = process.env.PI_CODING_AGENT === "true";
 	const isBunVirtualScript = currentScript?.startsWith("/$bunfs/root/");
-	if (isPiProcess && currentScript && !isBunVirtualScript && existsSync(currentScript)) {
-		return { command: process.execPath, args: [currentScript] };
+	const resolvedScript = currentScript === undefined ? undefined : resolve(currentScript);
+	if (isPiProcess && resolvedScript && !isBunVirtualScript && existsSync(resolvedScript)) {
+		return { command: process.execPath, args: [resolvedScript] };
 	}
 
 	return { command: "pi", args: [] };
@@ -318,25 +358,66 @@ export function resolvePiInvocation(): ChildInvocation {
 function consumeJsonLines(
 	stream: NodeJS.ReadableStream | null | undefined,
 	onLine: (line: string) => void,
+	onInvalid: (reason: string) => void,
 ): void {
-	if (!stream) return;
+	if (!stream) {
+		onInvalid("stdout was not available");
+		return;
+	}
 
 	const decoder = new StringDecoder("utf8");
 	let buffer = "";
-	stream.on("data", (chunk: Buffer | string) => {
-		buffer += decoder.write(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
-		while (true) {
-			const newline = buffer.indexOf("\n");
-			if (newline === -1) break;
-			let line = buffer.slice(0, newline);
-			buffer = buffer.slice(newline + 1);
-			if (line.endsWith("\r")) line = line.slice(0, -1);
-			onLine(line);
+	let droppingOversizedLine = false;
+	const consumeDecoded = (decoded: string) => {
+		let remaining = decoded;
+		while (remaining.length > 0) {
+			if (droppingOversizedLine) {
+				const newline = remaining.indexOf("\n");
+				if (newline === -1) return;
+				remaining = remaining.slice(newline + 1);
+				droppingOversizedLine = false;
+			}
+
+			buffer += remaining;
+			while (true) {
+				const newline = buffer.indexOf("\n");
+				if (newline === -1) break;
+				let line = buffer.slice(0, newline);
+				buffer = buffer.slice(newline + 1);
+				if (line.endsWith("\r")) line = line.slice(0, -1);
+				if (Buffer.byteLength(line, "utf8") > MAX_EVENT_LINE_BYTES) {
+					onInvalid(`stdout event line exceeds ${MAX_EVENT_LINE_BYTES} bytes`);
+				} else {
+					onLine(line);
+				}
+			}
+
+			if (Buffer.byteLength(buffer, "utf8") > MAX_EVENT_LINE_BYTES) {
+				onInvalid(`stdout event line exceeds ${MAX_EVENT_LINE_BYTES} bytes`);
+				buffer = "";
+				droppingOversizedLine = true;
+				return;
+			}
+			remaining = "";
 		}
+	};
+
+	stream.on("data", (chunk: Buffer | string) => {
+		consumeDecoded(decoder.write(typeof chunk === "string" ? Buffer.from(chunk) : chunk));
+	});
+	stream.on("error", (error) => {
+		onInvalid(`stdout stream error: ${error instanceof Error ? error.message : String(error)}`);
 	});
 	stream.on("end", () => {
-		buffer += decoder.end();
-		if (buffer.length > 0) onLine(buffer.endsWith("\r") ? buffer.slice(0, -1) : buffer);
+		consumeDecoded(decoder.end());
+		if (droppingOversizedLine) return;
+		if (buffer.length > 0) {
+			if (Buffer.byteLength(buffer, "utf8") > MAX_EVENT_LINE_BYTES) {
+				onInvalid(`stdout event line exceeds ${MAX_EVENT_LINE_BYTES} bytes`);
+				return;
+			}
+			onLine(buffer.endsWith("\r") ? buffer.slice(0, -1) : buffer);
+		}
 	});
 }
 
@@ -359,6 +440,17 @@ function terminateProcess(child: ChildProcess): () => void {
 			child.kill(signal);
 		} catch {
 			// The process has already exited.
+		}
+		if (process.platform === "win32" && pid) {
+			// Windows has no POSIX process-group equivalent. taskkill is the
+			// supported best-effort tree termination path for Pi-launched children.
+			const treeKill = spawn("taskkill", ["/pid", String(pid), "/t", "/f"], {
+				stdio: "ignore",
+				windowsHide: true,
+			});
+			treeKill.once("error", () => {
+				// The direct child may already have exited or taskkill may be absent.
+			});
 		}
 	};
 
@@ -419,18 +511,33 @@ function processChildEvent(line: string, state: ChildState): void {
 	try {
 		parsed = JSON.parse(line);
 	} catch {
-		// Pi's JSON mode is authoritative; non-JSON diagnostic lines are ignored.
+		state.eventStreamError ??= "stdout contained a non-JSON event line";
 		return;
 	}
-	if (!isRecord(parsed)) return;
+	if (!isRecord(parsed)) {
+		state.eventStreamError ??= "stdout contained a JSON value that was not an event object";
+		return;
+	}
 
 	const event = parsed as ChildEvent;
-	if (event.type === "message_end" && isRecord(event.message)) {
+	if (typeof event.type !== "string") {
+		state.eventStreamError ??= "stdout contained an event without a type";
+		return;
+	}
+	if (event.type === "message_end") {
+		if (!isRecord(event.message)) {
+			state.eventStreamError ??= "message_end did not contain a message object";
+			return;
+		}
 		applyAssistantMessage(event.message, state);
 		return;
 	}
 	if (event.type === "agent_end") {
 		state.agentEnded = true;
+		if (event.messages !== undefined && !Array.isArray(event.messages)) {
+			state.eventStreamError ??= "agent_end.messages was not an array";
+			return;
+		}
 		if (Array.isArray(event.messages)) {
 			for (const message of event.messages) {
 				if (isRecord(message)) applyAssistantMessage(message, state);
@@ -449,12 +556,166 @@ function failedResult(errorMessage: string, stderr = ""): ChildAgentResult {
 	};
 }
 
+async function canonicalizeCwd(input: string | undefined): Promise<string> {
+	const cwd = input ?? process.cwd();
+	if (cwd.length === 0 || cwd.includes("\0")) {
+		throw new SWEForgeRuntimeError(
+			"INVALID_CWD",
+			`Child working directory is not a valid filesystem path: ${JSON.stringify(cwd)}`,
+		);
+	}
+	let info;
+	try {
+		info = await stat(cwd);
+	} catch (error) {
+		throw new SWEForgeRuntimeError(
+			"INVALID_CWD",
+			`Child working directory could not be inspected: ${cwd}`,
+			{ cause: error, details: { cwd } },
+		);
+	}
+	if (!info.isDirectory()) {
+		throw new SWEForgeRuntimeError(
+			"INVALID_CWD",
+			`Child working directory is not a directory: ${cwd}`,
+			{ details: { cwd } },
+		);
+	}
+	try {
+		return await realpath(cwd);
+	} catch (error) {
+		throw new SWEForgeRuntimeError(
+			"INVALID_CWD",
+			`Child working directory could not be normalized: ${cwd}`,
+			{ cause: error, details: { cwd } },
+		);
+	}
+}
+
+const PI_VERSION_PATTERN = /(?:^|\s)(\d+)\.(\d+)\.(\d+)(?:-[0-9A-Za-z.-]+)?(?:\s|$)/u;
+
+/** Check the Pi CLI version against the documented public CLI boundary. */
+export function isSupportedPiVersion(version: string): boolean {
+	const match = PI_VERSION_PATTERN.exec(version.trim());
+	if (!match) return false;
+	return Number(match[1]) === 0 && Number(match[2]) === 84 && Number(match[3]) >= 1;
+}
+
+interface PiProbeResult {
+	readonly version?: string;
+	readonly error?: string;
+	readonly aborted: boolean;
+}
+
+async function probePiVersion(
+	invocation: ChildInvocation,
+	cwd: string,
+	env: NodeJS.ProcessEnv | undefined,
+	signal: AbortSignal | undefined,
+): Promise<PiProbeResult> {
+	if (signal?.aborted) return { aborted: true };
+	return new Promise((resolveProbe) => {
+		let settled = false;
+		let stdout = "";
+		let stderr = "";
+		let timeout: NodeJS.Timeout | undefined;
+		let removeAbort: (() => void) | undefined;
+		let terminationCleanup: (() => void) | undefined;
+		let processForProbe: ChildProcess | undefined;
+		let timedOut = false;
+		const finish = (result: PiProbeResult) => {
+			if (settled) return;
+			settled = true;
+			if (timeout) clearTimeout(timeout);
+			terminationCleanup?.();
+			removeAbort?.();
+			resolveProbe(result);
+		};
+
+		try {
+			processForProbe = spawn(invocation.command, [...invocation.args, "--version"], {
+				cwd,
+				env: { ...process.env, ...env },
+				shell: false,
+				stdio: ["ignore", "pipe", "pipe"],
+				detached: process.platform !== "win32",
+				windowsHide: true,
+			});
+		} catch (error) {
+			finish({ aborted: false, error: error instanceof Error ? error.message : String(error) });
+			return;
+		}
+
+		processForProbe.stdout?.on("data", (chunk: Buffer | string) => {
+			stdout = appendBounded(stdout, typeof chunk === "string" ? chunk : chunk.toString("utf8"), 8 * 1024, "[stdout truncated]");
+		});
+		processForProbe.stderr?.on("data", (chunk: Buffer | string) => {
+			stderr = appendBounded(stderr, typeof chunk === "string" ? chunk : chunk.toString("utf8"), 8 * 1024, "[stderr truncated]");
+		});
+		processForProbe.once("error", (error) => finish({ aborted: false, error: error.message }));
+		processForProbe.once("close", (code) => {
+			if (signal?.aborted) {
+				finish({ aborted: true });
+				return;
+			}
+			if (timedOut) {
+				finish({ aborted: false, error: "Pi compatibility probe timed out after 5000ms." });
+				return;
+			}
+			if (code !== 0) {
+				finish({
+					aborted: false,
+					error: `Pi compatibility probe exited with code ${String(code)}${stderr ? `: ${stderr.trim()}` : ""}`,
+				});
+				return;
+			}
+			const match = PI_VERSION_PATTERN.exec(stdout.trim());
+			if (!match) {
+				finish({ aborted: false, error: `Pi compatibility probe returned no semantic version: ${stdout.trim() || "(empty)"}` });
+				return;
+			}
+			const version = match[0].trim();
+			if (!isSupportedPiVersion(version)) {
+				finish({
+					aborted: false,
+					error: `Unsupported Pi version ${version}; supported compatibility range is ${PI_COMPATIBILITY_POLICY.range}.`,
+				});
+				return;
+			}
+			finish({ aborted: false, version });
+		});
+
+		const abort = () => {
+			if (processForProbe && !settled) {
+				terminationCleanup?.();
+				terminationCleanup = terminateProcess(processForProbe);
+			}
+		};
+		if (signal) {
+			signal.addEventListener("abort", abort, { once: true });
+			removeAbort = () => signal.removeEventListener("abort", abort);
+			if (signal.aborted) abort();
+		}
+		timeout = setTimeout(() => {
+			if (!settled && processForProbe) {
+				timedOut = true;
+				terminationCleanup?.();
+				terminationCleanup = terminateProcess(processForProbe);
+			}
+		}, 5_000);
+		timeout.unref?.();
+	});
+}
+
 /** Run one isolated Pi conversation and return only its final structured data. */
 async function runPiChildAgent(options: ChildAgentOptions): Promise<ChildAgentResult> {
 	// Validate capability selection before entering the child-error recovery path;
 	// invalid profiles are caller errors, not child process failures.
 	const tools = resolveTools(options);
-	const cwd = options.cwd ?? process.cwd();
+	if (options.signal?.aborted) {
+		return { status: "aborted", exitCode: null, text: "", stderr: "", errorMessage: "Child aborted before launch" };
+	}
+	const cwd = await canonicalizeCwd(options.cwd);
 	const access: CheckoutAccess = tools.includes("bash") ? "WRITABLE" : "READ_ONLY";
 
 	try {
@@ -498,9 +759,19 @@ async function runPiChildAgentUnlocked(
 	let tempDir: string | undefined;
 	let child: ChildProcess | undefined;
 
+	let piVersion: string | undefined;
 	try {
 		if (options.signal?.aborted) {
 			return { status: "aborted", exitCode: null, text: "", stderr: "", errorMessage: "Child aborted before launch" };
+		}
+
+		if (options.piCommand === undefined) {
+			const probe = await probePiVersion(invocation, cwd, options.env, options.signal);
+			if (probe.aborted) {
+				return { status: "aborted", exitCode: null, text: "", stderr: "", errorMessage: "Child aborted during Pi compatibility probe" };
+			}
+			if (probe.error) return failedResult(`Pi compatibility check failed: ${probe.error}`);
+			piVersion = probe.version;
 		}
 
 		let systemPromptPath: string | undefined;
@@ -536,7 +807,13 @@ async function runPiChildAgentUnlocked(
 			return failedResult(error instanceof Error ? error.message : String(error));
 		}
 
-		consumeJsonLines(child.stdout, (line) => processChildEvent(line, state));
+		consumeJsonLines(
+			child.stdout,
+			(line) => processChildEvent(line, state),
+			(reason) => {
+				state.eventStreamError ??= reason;
+			},
+		);
 		child.stderr?.on("data", (chunk: Buffer | string) => {
 			stderr = appendBounded(
 				stderr,
@@ -560,7 +837,12 @@ async function runPiChildAgentUnlocked(
 		const outcome = await waitForProcess(child);
 		const status: ChildAgentStatus = wasAborted
 			? "aborted"
-			: outcome.spawnError || outcome.exitCode !== 0 || state.stopReason === "error" || state.stopReason === "aborted"
+			: outcome.spawnError ||
+					outcome.exitCode !== 0 ||
+					state.stopReason === "error" ||
+					state.stopReason === "aborted" ||
+					state.eventStreamError !== undefined ||
+					state.outputTruncated
 				? "failed"
 				: state.agentEnded && state.assistantMessage
 					? "completed"
@@ -576,8 +858,17 @@ async function runPiChildAgentUnlocked(
 			errorMessage:
 				outcome.spawnError?.message ??
 				state.errorMessage ??
-				(status === "failed" ? "Child produced no successful completed result" : undefined),
+				state.eventStreamError ??
+				(state.outputTruncated
+					? "Child output was truncated before canonical validation"
+					: status === "failed" && (!state.agentEnded || !state.assistantMessage)
+						? "Child exited without a canonical assistant result"
+						: status === "failed"
+							? "Child did not complete successfully"
+							: undefined),
 			outputTruncated: state.outputTruncated || undefined,
+			eventStreamError: state.eventStreamError,
+			...(piVersion === undefined ? {} : { piVersion }),
 		};
 	} catch (error) {
 		if (wasAborted || options.signal?.aborted) {
@@ -589,6 +880,8 @@ async function runPiChildAgentUnlocked(
 				stderr,
 				errorMessage: "Child aborted",
 				outputTruncated: state.outputTruncated || undefined,
+				eventStreamError: state.eventStreamError,
+				...(piVersion === undefined ? {} : { piVersion }),
 			};
 		}
 		return failedResult(error instanceof Error ? error.message : String(error), stderr);
@@ -618,6 +911,7 @@ function runtimeMetadata(
 	options: SWEForgeTaskOptions,
 	profile: ChildToolProfile,
 	taskId: string | undefined,
+	cwd: string,
 ): SWEForgeTaskRuntimeMetadata {
 	return {
 		...child,
@@ -625,7 +919,7 @@ function runtimeMetadata(
 		expectedOutputContract: options.expectedOutputContract,
 		profile,
 		tools: getToolsForProfile(profile),
-		cwd: options.cwd ?? process.cwd(),
+		cwd,
 		...(options.model === undefined ? {} : { model: options.model }),
 		...(taskId === undefined ? {} : { taskId }),
 		cleanup: "complete",
@@ -663,7 +957,13 @@ export async function executeSWEForgeTask(options: SWEForgeTaskOptions): Promise
 			"SWE Forge child execution requires an explicit provider/model identifier.",
 		);
 	}
+	validateModelIdentifier(options.model);
+	validateThinkingLevel(options.thinkingLevel);
+	const cwd = await canonicalizeCwd(options.cwd);
 
+	// Validate the installed task contract even though the orchestrator supplies
+	// the concrete task text. This detects canonical contract drift before launch.
+	await loadCanonicalTaskContract(options.discovery);
 	const taskValidation = validateTaskContract(options.taskContract, {
 		requireTaskId: options.expectedOutputContract === "result",
 		expectedWriteAccess: options.profile,
@@ -687,7 +987,7 @@ export async function executeSWEForgeTask(options: SWEForgeTaskOptions): Promise
 		piCommandArgs: options.piCommandArgs,
 		env: options.env,
 	});
-	const runtime = runtimeMetadata(child, options, options.profile, taskId);
+	const runtime = runtimeMetadata(child, options, options.profile, taskId, cwd);
 
 	if (child.status !== "completed") {
 		return {

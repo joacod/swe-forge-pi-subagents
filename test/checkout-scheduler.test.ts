@@ -1,8 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { mkdir, mkdtemp, rm, symlink } from "node:fs/promises";
 import { join, sep } from "node:path";
 import { tmpdir } from "node:os";
-import { CheckoutScheduler } from "../src/checkout-scheduler.js";
+import { CheckoutScheduler, normalizeCheckout } from "../src/checkout-scheduler.js";
 
 function deferred(): { readonly promise: Promise<void>; readonly resolve: () => void } {
 	let resolve!: () => void;
@@ -181,6 +182,40 @@ test("does not block a different checkout", async () => {
 
 	firstRelease.resolve();
 	await first;
+});
+
+test("collapses symlink aliases to one checkout lock", async () => {
+	if (process.platform === "win32") return;
+	const parent = await mkdtemp(join(tmpdir(), "swe-forge-checkout-alias-"));
+	const checkout = join(parent, "checkout");
+	const alias = join(parent, "alias");
+	await mkdir(checkout);
+	await symlink(checkout, alias, "dir");
+
+	assert.equal(normalizeCheckout(checkout), normalizeCheckout(alias));
+	const scheduler = new CheckoutScheduler();
+	const started = deferred();
+	const release = deferred();
+	const first = scheduler.run(checkout, "READ_ONLY", async () => {
+		started.resolve();
+		await release.promise;
+	});
+	await started.promise;
+	let writerStarted = false;
+	const writer = scheduler.run(alias, "WRITABLE", () => {
+		writerStarted = true;
+	});
+	await nextTurn();
+	assert.equal(writerStarted, false);
+	release.resolve();
+	await Promise.all([first, writer]);
+	assert.equal(writerStarted, true);
+	await rm(parent, { recursive: true, force: true });
+});
+
+test("rejects invalid checkout identities before queueing", () => {
+	assert.throws(() => normalizeCheckout(""), TypeError);
+	assert.throws(() => normalizeCheckout("bad\0path"), TypeError);
 });
 
 test("prevents new readers from starving a queued writer", async () => {

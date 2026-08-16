@@ -1,4 +1,4 @@
-import { access, mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { access, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { after, afterEach, before, test } from "node:test";
 import assert from "node:assert/strict";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -9,6 +9,7 @@ import { SWE_FORGE_ROOT_ENV } from "../src/discovery.js";
 import { getSWEForgeCapabilities } from "../src/capabilities.js";
 import { executeSWEForgeTask } from "../src/runtime.js";
 import { SWEForgeRuntimeError } from "../src/projection.js";
+import { copyFakeSWEForgeInstallation } from "./fixtures.js";
 
 const temporaryRoots: string[] = [];
 let fixtureDirectory: string;
@@ -46,19 +47,20 @@ interface RegisteredTool {
 }
 
 async function createCanonicalRoot(): Promise<string> {
-	const root = await mkdtemp(join(tmpdir(), "swe-forge-extension-root-"));
+	const root = await copyFakeSWEForgeInstallation();
 	temporaryRoots.push(root);
-	await mkdir(join(root, ".swe-forge", "agents"), { recursive: true });
-	await mkdir(join(root, ".swe-forge", "contracts"), { recursive: true });
 	await Promise.all([
-		writeFile(join(root, "SWE-FORGE.md"), "workflow\n"),
-		writeFile(join(root, "AGENTS.md"), "instructions\n"),
-		writeFile(join(root, "VERSION"), "9.8.7\n"),
 		writeFile(join(root, ".swe-forge", "agents", "reader.md"), "# Reader\n\nRead-only role.\n"),
 		writeFile(join(root, ".swe-forge", "agents", "writer.md"), "# Writer\n\nWritable role.\n"),
 		writeFile(join(root, ".swe-forge", "contracts", "task.md"), TASK_CONTRACT),
-		writeFile(join(root, ".swe-forge", "contracts", "result.md"), "STATUS:\nTASK_ID:\nSUMMARY:\nVALIDATION:\n"),
-		writeFile(join(root, ".swe-forge", "contracts", "review.md"), "STATUS:\nTASK_ID:\nREVIEW_FOCUS:\nFINDINGS:\n"),
+		writeFile(
+			join(root, ".swe-forge", "contracts", "result.md"),
+			"STATUS: DONE | BLOCKED | FAILED\nTASK_ID: <task identifier>\nSUMMARY:\nVALIDATION:\n",
+		),
+		writeFile(
+			join(root, ".swe-forge", "contracts", "review.md"),
+			"status: PASS | CHANGES_REQUIRED\nreview_focus:\nfindings:\n",
+		),
 	]);
 	return root;
 }
@@ -166,7 +168,7 @@ test("returns machine-readable capabilities without workflow or provider decisio
 	assert.equal(result.isError, undefined);
 	assert.equal(details.extensionVersion, "0.1.0");
 	assert.equal(details.packageVersion, "0.1.0");
-	assert.equal(details.sweForge.version, "9.8.7");
+	assert.equal(details.sweForge.version, "0.1.0-alpha.1");
 	assert.equal(details.sweForge.root, await realpath(root));
 	assert.deepEqual(details.roles, ["reader", "writer"]);
 	assert.equal(details.readOnlyParallelSupport, true);

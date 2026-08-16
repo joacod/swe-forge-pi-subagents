@@ -1,6 +1,6 @@
 import { afterEach, test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -8,6 +8,7 @@ import {
 	SWE_FORGE_ROOT_ENV,
 	SWEForgeInstallationError,
 } from "../src/discovery.js";
+import { FAKE_SWE_FORGE_FIXTURE, copyFakeSWEForgeInstallation } from "./fixtures.js";
 
 const temporaryRoots: string[] = [];
 
@@ -15,19 +16,16 @@ afterEach(async () => {
 	await Promise.all(temporaryRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
-async function populateInstallation(root: string, version = "1.2.3\n"): Promise<void> {
-	await mkdir(join(root, ".swe-forge"), { recursive: true });
-	await Promise.all([
-		writeFile(join(root, "SWE-FORGE.md"), "canonical workflow\n"),
-		writeFile(join(root, "AGENTS.md"), "instructions\n"),
-		writeFile(join(root, "VERSION"), version),
-	]);
+async function populateInstallation(root: string, version = "0.1.0-alpha.1\n"): Promise<void> {
+	await mkdir(root, { recursive: true });
+	await cp(FAKE_SWE_FORGE_FIXTURE, root, { recursive: true });
+	await writeFile(join(root, "VERSION"), version);
 }
 
-async function createInstallation(version = "1.2.3\n"): Promise<string> {
-	const root = await mkdtemp(join(tmpdir(), "swe-forge-installation-"));
+async function createInstallation(version = "0.1.0-alpha.1\n"): Promise<string> {
+	const root = await copyFakeSWEForgeInstallation();
 	temporaryRoots.push(root);
-	await populateInstallation(root, version);
+	await writeFile(join(root, "VERSION"), version);
 	return root;
 }
 
@@ -41,7 +39,7 @@ test("discovers a valid canonical installation", async () => {
 	const normalizedRoot = await realpath(root);
 
 	assert.equal(installation.root, normalizedRoot);
-	assert.equal(installation.version, "1.2.3");
+	assert.equal(installation.version, "0.1.0-alpha.1");
 	assert.equal(installation.paths.canonical, join(normalizedRoot, ".swe-forge"));
 });
 
@@ -49,12 +47,12 @@ test("discovers the standard Pi support path", async () => {
 	const home = await mkdtemp(join(tmpdir(), "swe-forge-home-"));
 	temporaryRoots.push(home);
 	const root = join(home, ".pi", "agent", "swe-forge");
-	await populateInstallation(root, "4.5.6\n");
+	await populateInstallation(root, "0.1.1\n");
 
 	const installation = await discoverSWEForgeInstallation({ env: {}, homeDirectory: home });
 
 	assert.equal(installation.root, await realpath(root));
-	assert.equal(installation.version, "4.5.6");
+	assert.equal(installation.version, "0.1.1");
 });
 
 test("reports a missing installation with a typed error", async () => {
@@ -90,14 +88,14 @@ test("reports partial and corrupt installations", async () => {
 });
 
 test("uses the explicit override instead of the standard location", async () => {
-	const root = await createInstallation("2.0.0\n");
+	const root = await createInstallation("0.1.0\n");
 	const installation = await discoverSWEForgeInstallation({
 		env: { [SWE_FORGE_ROOT_ENV]: root },
 		homeDirectory: join(root, "no-default-installation"),
 	});
 
 	assert.equal(installation.root, await realpath(root));
-	assert.equal(installation.version, "2.0.0");
+	assert.equal(installation.version, "0.1.0");
 });
 
 test("does not fall back when an explicit override is missing", async () => {
@@ -127,4 +125,38 @@ test("loads the detected version from the first VERSION line", async () => {
 	const installation = await discoverSWEForgeInstallation(override(root));
 
 	assert.equal(installation.version, "0.1.0-alpha.1");
+});
+
+test("rejects invalid and unsupported SWE-Forge versions instead of guessing", async () => {
+	const invalid = await createInstallation("not-a-version\n");
+	await assert.rejects(
+		discoverSWEForgeInstallation(override(invalid)),
+		(error: unknown) => error instanceof SWEForgeInstallationError && error.code === "INVALID_VERSION",
+	);
+
+	const unsupported = await createInstallation("0.2.0\n");
+	await assert.rejects(
+		discoverSWEForgeInstallation(override(unsupported)),
+		(error: unknown) =>
+			error instanceof SWEForgeInstallationError &&
+				error.code === "UNSUPPORTED_VERSION" &&
+				error.version === "0.2.0",
+	);
+});
+
+test("accepts a BOM-prefixed semantic version", async () => {
+	const root = await createInstallation("\uFEFF0.1.2\n");
+	const installation = await discoverSWEForgeInstallation(override(root));
+	assert.equal(installation.version, "0.1.2");
+});
+
+test("preserves symlinked support-root entries while validating their targets", async () => {
+	if (process.platform === "win32") return;
+	const root = await createInstallation();
+	const target = join(root, ".swe-forge", "agents", "reader.md");
+	const linked = join(root, ".swe-forge", "agents", "linked-reader.md");
+	await symlink(target, linked);
+
+	const installation = await discoverSWEForgeInstallation(override(root));
+	assert.equal(installation.root, await realpath(root));
 });

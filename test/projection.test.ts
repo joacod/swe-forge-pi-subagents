@@ -1,8 +1,7 @@
 import { afterEach, test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { realpath, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { tmpdir } from "node:os";
 import {
 	SWEForgeRuntimeError,
 	composeRuntimePrompt,
@@ -16,6 +15,7 @@ import {
 	validateTaskContract,
 } from "../src/projection.js";
 import { SWE_FORGE_ROOT_ENV } from "../src/discovery.js";
+import { copyFakeSWEForgeInstallation } from "./fixtures.js";
 
 const temporaryRoots: string[] = [];
 
@@ -26,14 +26,9 @@ const RESULT_CONTRACT = "# Result Contract\n\nSTATUS: DONE | BLOCKED | FAILED\nS
 const REVIEW_CONTRACT = "# Review Contract\n\nstatus: PASS | CHANGES_REQUIRED\nreview_focus:\nfindings:\n";
 
 async function createCanonicalRoot(): Promise<string> {
-	const root = await mkdtemp(join(tmpdir(), "swe-forge-projection-"));
+	const root = await copyFakeSWEForgeInstallation();
 	temporaryRoots.push(root);
-	await mkdir(join(root, ".swe-forge", "agents"), { recursive: true });
-	await mkdir(join(root, ".swe-forge", "contracts"), { recursive: true });
 	await Promise.all([
-		writeFile(join(root, "SWE-FORGE.md"), "workflow\n"),
-		writeFile(join(root, "AGENTS.md"), "instructions\n"),
-		writeFile(join(root, "VERSION"), "1.0.0\n"),
 		writeFile(join(root, ".swe-forge", "agents", "implementer.md"), ROLE_MARKDOWN),
 		writeFile(join(root, ".swe-forge", "agents", "reviewer.md"), "# Reviewer\n"),
 		writeFile(join(root, ".swe-forge", "agents", "notes.txt"), "not a role\n"),
@@ -56,7 +51,7 @@ test("discovers only safe canonical role names and ignores non-markdown files", 
 	const root = await createCanonicalRoot();
 	await writeFile(join(root, ".swe-forge", "agents", "nested.md"), "not a role directory\n");
 
-	assert.deepEqual(await discoverCanonicalRoleNames(discovery(root)), ["implementer", "nested", "reviewer"]);
+	assert.deepEqual(await discoverCanonicalRoleNames(discovery(root)), ["implementer", "nested", "reader", "reviewer", "writer"]);
 });
 
 test("loads a role by discovered name and rereads canonical markdown on every invocation", async () => {
@@ -162,6 +157,17 @@ test("identifies task IDs only when present and can require them", () => {
 	);
 });
 
+test("rejects conflicting task metadata instead of choosing the first declaration", () => {
+	assert.throws(
+		() => validateTaskContract("TASK_ID: task-123\nwrite_access: read-only\nwrite_access: read-write\n", { requireTaskId: true }),
+		(error: unknown) => error instanceof SWEForgeRuntimeError && error.code === "ACCESS_CONFLICT",
+	);
+	assert.throws(
+		() => validateTaskContract("TASK_ID: task-123\nTASK_ID: other\n", { requireTaskId: true }),
+		(error: unknown) => error instanceof SWEForgeRuntimeError && error.code === "CONFLICTING_TASK_ID",
+	);
+});
+
 test("validates result status, structure, and delegated TASK_ID", () => {
 	const output = "STATUS: DONE\nTASK_ID: task-123\nSUMMARY:\nVALIDATION:\n";
 	assert.deepEqual(validateCanonicalOutput(output, "result", { taskId: "task-123" }), {
@@ -199,6 +205,13 @@ test("blocks malformed output instead of treating it as a successful result", ()
 				error.status === "BLOCKED",
 		);
 	}
+});
+
+test("rejects statuses outside the canonical output contract", () => {
+	assert.throws(
+		() => validateCanonicalOutput("STATUS: UNKNOWN\nTASK_ID: task-123\nSUMMARY:\nVALIDATION:\n", "result"),
+		(error: unknown) => error instanceof SWEForgeRuntimeError && error.code === "INVALID_STATUS",
+	);
 });
 
 test("validates the recognizable review contract and optional task identity", () => {

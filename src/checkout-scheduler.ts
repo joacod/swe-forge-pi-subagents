@@ -1,3 +1,4 @@
+import { realpathSync } from "node:fs";
 import { normalize, resolve } from "node:path";
 
 /** The two access modes supported by the shared checkout lock. */
@@ -28,9 +29,24 @@ interface CheckoutState {
 	waiters: Waiter[];
 }
 
-/** Normalize a cwd before using it as a lock identity. */
+/**
+ * Normalize a cwd before using it as a lock identity.
+ *
+ * Existing symlink aliases are collapsed so `/project` and `/link-to-project`
+ * cannot acquire independent in-process locks. A not-yet-created path keeps a
+ * lexical identity; the runtime rejects such paths before spawning a child.
+ */
 export function normalizeCheckout(cwd: string): string {
-	return normalize(resolve(cwd));
+	if (typeof cwd !== "string" || cwd.length === 0 || cwd.includes("\0")) {
+		throw new TypeError("Checkout path must be a non-empty filesystem path without NUL bytes.");
+	}
+
+	const resolved = normalize(resolve(cwd));
+	try {
+		return normalize(realpathSync.native(resolved));
+	} catch {
+		return resolved;
+	}
 }
 
 function isCheckoutAccess(value: unknown): value is CheckoutAccess {
