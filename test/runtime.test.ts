@@ -207,6 +207,29 @@ test("runs a writable role with the exact WRITABLE profile", async () => {
 	assert.equal(result.runtime.cleanup, "complete");
 });
 
+test("serializes writable child runtimes in the same checkout", async () => {
+	const root = await createCanonicalRoot();
+	const project = await createProject();
+	const firstRecord = await recordPath();
+	const secondRecord = await recordPath();
+	const controller = new AbortController();
+	const first = executeSWEForgeTask({
+		...childOptions(root, project, firstRecord, "hang", "WRITABLE"),
+		signal: controller.signal,
+	});
+	await waitForRecord(firstRecord);
+
+	const second = executeSWEForgeTask(childOptions(root, project, secondRecord, "success", "WRITABLE"));
+	await assert.rejects(access(secondRecord));
+
+	controller.abort();
+	const firstResult = await first;
+	const secondResult = await second;
+	assert.equal(firstResult.runtime.status, "aborted");
+	assert.equal(secondResult.runtime.status, "completed");
+	await access(secondRecord);
+});
+
 test("validates the canonical review contract as a separate expected output", async () => {
 	const root = await createCanonicalRoot();
 	const project = await createProject();

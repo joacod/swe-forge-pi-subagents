@@ -4,7 +4,9 @@ Minimal Pi package primitive for SWE Forge's canonical `SUBAGENTS` topology.
 It discovers the installed SWE-Forge support root, projects canonical roles and
 contracts into one transient runtime prompt, and executes exactly one bounded
 child task in a fresh Pi JSON subprocess. It does not implement orchestration,
-workflows, or filesystem isolation.
+workflows, or filesystem isolation. Child calls use a local in-memory
+per-checkout shared-read/exclusive-write lock; the lock is not a worktree or
+general task scheduler.
 
 ## Architecture
 
@@ -18,8 +20,8 @@ The package discovers the canonical SWE-Forge support root at
 For development and tests only, set `SWE_FORGE_ROOT` to an alternate root;
 invalid overrides do not fall back to another location. Runtime projection
 loaders rediscover that root on each invocation, accept role names only, and
-return canonical markdown without generating `.pi/agents/*.md` files. Child
-execution is intentionally deferred to a later step.
+return canonical markdown without generating `.pi/agents/*.md` files. The
+runtime then launches one child process with the selected access profile.
 
 The public projection helpers are exported from `src/index.ts`: discover role
 names with `discoverCanonicalRoleNames`, load roles and the fixed `task`,
@@ -30,7 +32,9 @@ is exposed through `executeSWEForgeTask` (also `runSWEForgeTask`) and provides
 only `READ_ONLY` (`read`, `grep`, `find`, `ls`) and `WRITABLE` (those tools plus
 `edit`, `write`, `bash`) profiles. Profiles restrict model-visible Pi tools;
 they are not an operating-system sandbox, so the child retains the invoking
-user's OS permissions.
+user's OS permissions. Calls using the same normalized `cwd` share the lock:
+read-only calls may overlap, while writable calls exclude readers and other
+writers until completion.
 
 See [`docs/architecture.md`](docs/architecture.md) for the technical spike,
 compatibility assumptions, and isolation semantics.

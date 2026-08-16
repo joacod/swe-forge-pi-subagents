@@ -2,6 +2,7 @@ import { Type } from "typebox";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { executeSWEForgeTask, type ChildToolProfile } from "./runtime.js";
 
+export * from "./checkout-scheduler.js";
 export * from "./discovery.js";
 export * from "./projection.js";
 export * from "./runtime.js";
@@ -30,7 +31,7 @@ const SubagentParameters = Type.Object({
 /**
  * The single Pi extension entry point for the Forge runtime.
  *
- * The tool executes one bounded task only. It does not schedule, chain,
+ * The tool executes one bounded task only. It does not schedule tasks, chain,
  * resume, steer, persist, create worktrees, deliver changes, or expose a
  * generic subagent. Capability profiles restrict model-visible Pi tools; they
  * are not an OS sandbox, and the child still has the invoking user's local

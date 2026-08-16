@@ -4,6 +4,11 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { StringDecoder } from "node:string_decoder";
+import {
+	checkoutScheduler,
+	isCheckoutAbortError,
+	type CheckoutAccess,
+} from "./checkout-scheduler.js";
 import type { SWEForgeDiscoveryOptions } from "./discovery.js";
 import {
 	composeRuntimePrompt,
@@ -450,6 +455,34 @@ async function runPiChildAgent(options: ChildAgentOptions): Promise<ChildAgentRe
 	// invalid profiles are caller errors, not child process failures.
 	const tools = resolveTools(options);
 	const cwd = options.cwd ?? process.cwd();
+	const access: CheckoutAccess = tools.includes("bash") ? "WRITABLE" : "READ_ONLY";
+
+	try {
+		return await checkoutScheduler.run(
+			cwd,
+			access,
+			() => runPiChildAgentUnlocked(options, tools, cwd),
+			options.signal,
+		);
+	} catch (error) {
+		if (options.signal?.aborted || isCheckoutAbortError(error)) {
+			return {
+				status: "aborted",
+				exitCode: null,
+				text: "",
+				stderr: "",
+				errorMessage: "Child aborted before launch",
+			};
+		}
+		throw error;
+	}
+}
+
+async function runPiChildAgentUnlocked(
+	options: ChildAgentOptions,
+	tools: readonly BuiltinTool[],
+	cwd: string,
+): Promise<ChildAgentResult> {
 	const invocation = options.piCommand
 		? { command: options.piCommand, args: options.piCommandArgs ?? [] }
 		: resolvePiInvocation();
