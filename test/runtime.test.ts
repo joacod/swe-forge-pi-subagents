@@ -7,6 +7,7 @@ import {
 	executeSWEForgeTask,
 	READ_ONLY_TOOLS,
 	runChildAgent,
+	getToolsForProfile,
 	isSupportedPiVersion,
 	WRITABLE_TOOLS,
 } from "../src/runtime.js";
@@ -377,6 +378,13 @@ test("recognizes only the tested Pi compatibility line", () => {
 	assert.equal(isSupportedPiVersion("0.85.0"), false);
 	assert.equal(isSupportedPiVersion("0.84.1-beta.1"), false);
 	assert.equal(isSupportedPiVersion("not-a-version"), false);
+});
+
+test("keeps the closed child profiles immutable", () => {
+	assert.throws(() => (READ_ONLY_TOOLS as unknown as string[]).push("bash"), TypeError);
+	assert.throws(() => (WRITABLE_TOOLS as unknown as string[]).splice(0, 1), TypeError);
+	assert.deepEqual(getToolsForProfile("READ_ONLY"), ["read", "grep", "find", "ls"]);
+	assert.deepEqual(getToolsForProfile("WRITABLE"), ["read", "grep", "find", "ls", "edit", "write", "bash"]);
 });
 
 test("fails before launch when no explicit model is supplied", async () => {

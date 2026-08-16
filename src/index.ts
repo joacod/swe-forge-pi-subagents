@@ -14,13 +14,30 @@ import {
 } from "./projection.js";
 
 export * from "./capabilities.js";
-export * from "./checkout-scheduler.js";
 export * from "./discovery.js";
 export * from "./projection.js";
-export * from "./runtime.js";
+// Keep the package entry focused on the canonical task primitive. The generic
+// Pi transport, argument builder, and checkout scheduler remain implementation
+// details rather than a second child-agent API.
+export {
+	CHILD_TOOL_PROFILES,
+	READ_ONLY_TOOLS,
+	WRITABLE_TOOLS,
+	executeSWEForgeTask,
+	runSWEForgeSubagent,
+	runSWEForgeTask,
+} from "./runtime.js";
+export type {
+	BuiltinTool,
+	ChildToolProfile,
+	SWEForgeTaskOptions,
+	SWEForgeTaskResult,
+	SWEForgeTaskRuntimeMetadata,
+	ThinkingLevel,
+} from "./runtime.js";
 
 export const SWE_FORGE_SUBAGENT_TOOL_NAME = "swe_forge_subagent";
-export const SWE_FORGE_SUBAGENT_ACTIONS = ["capabilities", "run"] as const;
+export const SWE_FORGE_SUBAGENT_ACTIONS = Object.freeze(["capabilities", "run"] as const);
 
 // Keep the provider-compatible enum shape used by current Pi without adding
 // another runtime dependency to this small package.
