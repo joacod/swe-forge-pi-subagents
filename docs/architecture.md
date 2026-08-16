@@ -11,13 +11,15 @@
 launch one real Pi child-agent context for SWE Forge's canonical `SUBAGENTS`
 topology and return its structured completion to the SWE Forge orchestrator.
 The adapter owns only canonical-source projection plus the Pi process/session
-boundary and transport details:
+boundary, transport, and child-access coordination details:
 
 - discover canonical role names and load selected role/contract markdown from
   the detected support root without copying or translating it;
 - compose one bounded prompt from the selected role, supplied task contract,
   expected output contract, and the required Pi-runtime guardrail;
 - launch a child with an explicit checkout, model, prompt, and tool allowlist;
+- guard each child lifetime with a local per-cwd shared-read/exclusive-write
+  lock;
 - keep the child conversation separate from the parent conversation;
 - collect Pi's JSON event stream into a bounded result;
 - propagate cancellation and clean up the child process and temporary prompt
@@ -34,7 +36,9 @@ This package is not a general multi-agent framework. It does not provide:
 - topology selection, workflow execution, or policy loading; canonical role
   discovery and contract loading are projections only, not package-owned
   definitions;
-- parallel/chain/background scheduling, queues, retries, or persistence;
+- parallel/chain/background task scheduling, queues, retries, or persistence;
+  the per-checkout lock only coordinates the lifetime of already-issued child
+  calls;
 - worktrees, filesystem isolation, Git integration, or delivery automation;
 - role definitions, task/result contracts, or workflow behavior owned by
   SWE Forge;
@@ -254,9 +258,12 @@ capture, cancellation, failures, and cleanup with fixture-backed tests.
 - **Prompt injection:** child output is untrusted model output. The adapter
   returns it as data; SWE Forge must validate structured results and must not
   treat child claims as Git or test evidence.
-- **Concurrency:** the package does not coordinate writers. SWE Forge owns the
-  rule that only one writable worker runs in a shared checkout; concurrent
-  writable work requires `ISOLATED`.
+- **Concurrency:** each child execution acquires a local in-memory lock keyed by
+  its normalized cwd. `READ_ONLY` children share the checkout, while a
+  `WRITABLE` child excludes both readers and other writers until it exits. This
+  lock does not create worktrees or coordinate separate runtime processes;
+  concurrent writable work across isolated environments remains an
+  `ISOLATED` SWE Forge concern.
 
 ## Unresolved risks
 
@@ -279,6 +286,7 @@ capture, cancellation, failures, and cleanup with fixture-backed tests.
    determinism but means the child does not automatically receive repository
    `AGENTS.md` or Pi extension tools. SWE Forge must include any required
    canonical instructions in the explicit task/system prompt.
-6. **No filesystem isolation:** a caller that violates SWE Forge's shared-write
-   sequencing can still race another writer. Preventing that belongs in SWE
-   Forge routing/authorization, not in this narrow Pi primitive.
+6. **No filesystem isolation:** the lock is local to one runtime process and
+   does not protect against another process or package instance using the same
+   checkout. Worktree isolation and concurrent writable execution across
+   environments remain outside this package.
