@@ -22,28 +22,30 @@ import {
 } from "./projection.js";
 
 /** The built-in Pi tools that are available to the child runtime. */
-export const BUILTIN_TOOLS = ["read", "bash", "edit", "write", "grep", "find", "ls"] as const;
+export const BUILTIN_TOOLS = Object.freeze(["read", "bash", "edit", "write", "grep", "find", "ls"] as const);
 export type BuiltinTool = (typeof BUILTIN_TOOLS)[number];
 
 /** The exact read-only capability profile. It intentionally contains no shell. */
-export const READ_ONLY_TOOLS = ["read", "grep", "find", "ls"] as const satisfies readonly BuiltinTool[];
+export const READ_ONLY_TOOLS = Object.freeze(["read", "grep", "find", "ls"] as const) satisfies readonly BuiltinTool[];
 
 /**
  * The exact writable capability profile. These are the current built-ins needed
  * to edit files and run local validation; no generic or delegation tool is part
  * of either profile.
  */
-export const WRITABLE_TOOLS = ["read", "grep", "find", "ls", "edit", "write", "bash"] as const satisfies readonly BuiltinTool[];
+export const WRITABLE_TOOLS = Object.freeze(
+	["read", "grep", "find", "ls", "edit", "write", "bash"] as const,
+) satisfies readonly BuiltinTool[];
 
-export const CHILD_TOOL_PROFILES = {
+export const CHILD_TOOL_PROFILES = Object.freeze({
 	READ_ONLY: READ_ONLY_TOOLS,
 	WRITABLE: WRITABLE_TOOLS,
-} as const;
+} as const);
 
 export type ChildToolProfile = keyof typeof CHILD_TOOL_PROFILES;
 
 /** Names denied even when a future Pi configuration tries to add extensions. */
-export const DELEGATION_TOOL_NAMES = ["subagent", "swe_forge_subagent"] as const;
+export const DELEGATION_TOOL_NAMES = Object.freeze(["subagent", "swe_forge_subagent"] as const);
 
 /** Keep diagnostics bounded; the final worker output is bounded separately. */
 export const MAX_STDERR_BYTES = 16 * 1024;
@@ -130,8 +132,11 @@ export interface SWEForgeTaskOptions {
 	readonly model?: string;
 	readonly thinkingLevel?: ThinkingLevel;
 	readonly signal?: AbortSignal;
+}
+
+/** Fixture-only transport controls; deliberately absent from the package API. */
+interface InternalSWEForgeTaskOptions extends SWEForgeTaskOptions {
 	readonly discovery?: SWEForgeDiscoveryOptions;
-	/** Test seam for a Pi executable or fixture. */
 	readonly piCommand?: string;
 	readonly piCommandArgs?: readonly string[];
 	readonly env?: NodeJS.ProcessEnv;
@@ -308,6 +313,9 @@ function resolveTools(options: BuildChildArgsOptions): BuiltinTool[] {
  * Resource discovery is intentionally disabled here. SWE Forge supplies the
  * child contract explicitly rather than asking a child to discover workflow
  * roles or to load the adapter recursively.
+ *
+ * @internal The package entry point deliberately does not expose this generic
+ * transport helper.
  */
 export function buildChildArgs(options: BuildChildArgsOptions): string[] {
 	const tools = resolveTools(options);
@@ -900,9 +908,8 @@ async function runPiChildAgentUnlocked(
 }
 
 /**
- * Compatibility entry point for the low-level transport and the canonical
- * single-task runtime. Role-aware callers receive the validated Forge result;
- * transport callers receive only child/process metadata.
+ * Internal compatibility entry point for fixture-backed transport tests and the
+ * canonical single-task runtime. It is not re-exported from the package entry.
  */
 export function runChildAgent(options: ChildAgentOptions): Promise<ChildAgentResult>;
 export function runChildAgent(options: SWEForgeTaskOptions): Promise<SWEForgeTaskResult>;
@@ -957,44 +964,45 @@ function rethrowWithRuntimeDetails(
  * discovery, session persistence, or delegation tools.
  */
 export async function executeSWEForgeTask(options: SWEForgeTaskOptions): Promise<SWEForgeTaskResult> {
-	getToolsForProfile(options.profile);
-	if (typeof options.model !== "string" || options.model.trim().length === 0) {
+	const internalOptions = options as InternalSWEForgeTaskOptions;
+	getToolsForProfile(internalOptions.profile);
+	if (typeof internalOptions.model !== "string" || internalOptions.model.trim().length === 0) {
 		throw new SWEForgeRuntimeError(
 			"MISSING_MODEL",
 			"SWE Forge child execution requires an explicit provider/model identifier.",
 		);
 	}
-	validateModelIdentifier(options.model);
-	validateThinkingLevel(options.thinkingLevel);
-	const cwd = await canonicalizeCwd(options.cwd);
+	validateModelIdentifier(internalOptions.model);
+	validateThinkingLevel(internalOptions.thinkingLevel);
+	const cwd = await canonicalizeCwd(internalOptions.cwd);
 
 	// Validate the installed task contract even though the orchestrator supplies
 	// the concrete task text. This detects canonical contract drift before launch.
-	await loadCanonicalTaskContract(options.discovery);
-	const taskValidation = validateTaskContract(options.taskContract, {
-		requireTaskId: options.expectedOutputContract === "result",
-		expectedWriteAccess: options.profile,
+	await loadCanonicalTaskContract(internalOptions.discovery);
+	const taskValidation = validateTaskContract(internalOptions.taskContract, {
+		requireTaskId: internalOptions.expectedOutputContract === "result",
+		expectedWriteAccess: internalOptions.profile,
 	});
 	const prompt = await composeRuntimePrompt({
-		roleName: options.roleName,
-		taskContract: options.taskContract,
-		expectedOutputContract: options.expectedOutputContract,
-		discovery: options.discovery,
+		roleName: internalOptions.roleName,
+		taskContract: internalOptions.taskContract,
+		expectedOutputContract: internalOptions.expectedOutputContract,
+		discovery: internalOptions.discovery,
 	});
-	const taskId = taskValidation.taskId ?? extractTaskIdentifier(options.taskContract);
+	const taskId = taskValidation.taskId ?? extractTaskIdentifier(internalOptions.taskContract);
 	const child = await runPiChildAgent({
 		task: "Execute the bounded SWE-Forge task and return only the required canonical output.",
 		systemPrompt: prompt,
-		cwd: options.cwd,
-		model: options.model,
-		thinkingLevel: options.thinkingLevel,
-		profile: options.profile,
-		signal: options.signal,
-		piCommand: options.piCommand,
-		piCommandArgs: options.piCommandArgs,
-		env: options.env,
+		cwd: internalOptions.cwd,
+		model: internalOptions.model,
+		thinkingLevel: internalOptions.thinkingLevel,
+		profile: internalOptions.profile,
+		signal: internalOptions.signal,
+		piCommand: internalOptions.piCommand,
+		piCommandArgs: internalOptions.piCommandArgs,
+		env: internalOptions.env,
 	});
-	const runtime = runtimeMetadata(child, options, options.profile, taskId, cwd);
+	const runtime = runtimeMetadata(child, internalOptions, internalOptions.profile, taskId, cwd);
 
 	if (child.status !== "completed") {
 		return {
@@ -1007,9 +1015,9 @@ export async function executeSWEForgeTask(options: SWEForgeTaskOptions): Promise
 	}
 
 	try {
-		const validation = validateCanonicalOutput(child.text, options.expectedOutputContract, {
+		const validation = validateCanonicalOutput(child.text, internalOptions.expectedOutputContract, {
 			taskId,
-			requireTaskId: options.expectedOutputContract === "result",
+			requireTaskId: internalOptions.expectedOutputContract === "result",
 		});
 		return {
 			output: child.text,

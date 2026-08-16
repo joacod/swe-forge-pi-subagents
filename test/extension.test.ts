@@ -5,6 +5,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import registerSWEForgeSubagent, { SWE_FORGE_SUBAGENT_TOOL_NAME } from "../src/index.js";
+import * as packageEntry from "../src/index.js";
 import { SWE_FORGE_ROOT_ENV } from "../src/discovery.js";
 import { getSWEForgeCapabilities } from "../src/capabilities.js";
 import { executeSWEForgeTask } from "../src/runtime.js";
@@ -117,8 +118,8 @@ function context(cwd: string): Record<string, unknown> {
 
 function withFixture(root: string, mode: string, record?: string) {
 	return {
-		executeTask: async (options: Parameters<typeof executeSWEForgeTask>[0]) =>
-			executeSWEForgeTask({
+		executeTask: async (options: Parameters<typeof executeSWEForgeTask>[0]) => {
+			const fixtureOptions = {
 				...options,
 				discovery: discovery(root),
 				piCommand: process.execPath,
@@ -127,7 +128,9 @@ function withFixture(root: string, mode: string, record?: string) {
 					...(record === undefined ? {} : { SWE_FORGE_FIXTURE_RECORD: record }),
 					SWE_FORGE_FIXTURE_MODE: mode,
 				},
-			}),
+			} as Parameters<typeof executeSWEForgeTask>[0];
+			return executeSWEForgeTask(fixtureOptions);
+		},
 	};
 }
 
@@ -143,6 +146,13 @@ afterEach(async () => {
 
 after(async () => {
 	await rm(fixtureDirectory, { recursive: true, force: true });
+});
+
+test("keeps generic transport helpers out of the package entry point", () => {
+	assert.equal("runChildAgent" in packageEntry, false);
+	assert.equal("buildChildArgs" in packageEntry, false);
+	assert.equal("resolvePiInvocation" in packageEntry, false);
+	assert.equal("CheckoutScheduler" in packageEntry, false);
 });
 
 test("registers exactly the Forge-specific tool and v1 actions", () => {

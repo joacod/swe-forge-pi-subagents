@@ -25,13 +25,13 @@ scheduler.
 ## Relationship to SWE-Forge
 
 SWE-Forge is the source of truth and must already be installed before this
-package can run. The package reads the live canonical installation at
-`~/.pi/agent/swe-forge/`, including `SWE-FORGE.md`, `AGENTS.md`, `VERSION`, and
-`.swe-forge/`. It does not install, copy, bundle, translate, or redefine those
-sources. The canonical workflow may feature-detect this package when it has
-selected or is considering `SUBAGENTS`; when it is absent, SWE-Forge continues
-with its normal SOLO/sequential fallback. This repository does not modify the
-main adapter or wire that optional path in automatically.
+package can run. The package validates and projects the live canonical
+installation at `~/.pi/agent/swe-forge/`, including `SWE-FORGE.md`, `AGENTS.md`,
+`VERSION`, and `.swe-forge/`. It does not install, copy, bundle, translate, or
+redefine those sources. The canonical workflow may feature-detect this package
+when it has selected or is considering `SUBAGENTS`; when it is absent,
+SWE-Forge continues with its normal SOLO/sequential fallback. This repository
+does not modify the main adapter or wire that optional path in automatically.
 
 This package must not be used as a replacement for the main SWE-Forge
 repository. The eventual adapter integration is documented in
@@ -58,6 +58,11 @@ The extension does not intercept `/swe-forge`, select `SOLO`/`SUBAGENTS`/
 `ISOLATED`, or delegate work on its own. Loading the package makes its
 capability available to Pi; the canonical SWE-Forge adapter decides whether to
 use it.
+
+The package entry point exposes the canonical projection helpers and one
+SWE-Forge task runner. Low-level Pi transport, argument-building, and checkout
+lock helpers are implementation details and are not re-exported as a generic
+child-agent API.
 
 ## Installation
 

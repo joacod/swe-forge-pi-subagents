@@ -176,6 +176,11 @@ predictable and prevents the adapter's own extension from being rediscovered
 recursively. Profiles restrict model-visible Pi tools, not the operating-system
 permissions of the child process.
 
+The package entry point exposes the canonical task boundary and the
+projection/capability surfaces needed to integrate it. Generic transport,
+argument-building, and checkout-lock helpers remain implementation details, not
+another public child-agent framework.
+
 The runner resolves the current Pi executable conservatively: when the active
 Pi script is a real file it invokes it with the current Node executable; it
 otherwise falls back to the `pi` command. For a real invocation it probes
