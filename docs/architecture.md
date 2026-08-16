@@ -55,9 +55,11 @@ this package.
 
 ## Focused technical spike
 
-The research target was the Pi installation available in this environment:
-`@earendil-works/pi-coding-agent` **0.84.2** (Pi CLI `0.84.2`), under
-`/Users/joaquindiaz/.nvm/versions/node/v24.15.0/lib/node_modules/`.
+The research target covered the Pi package development install
+`@earendil-works/pi-coding-agent` **0.84.1** and the separately installed Pi
+CLI/package **0.84.2**, under
+`/Users/joaquindiaz/.nvm/versions/node/v24.15.0/lib/node_modules/`. The
+adapter's conservative supported line is `>=0.84.1 <0.85.0`.
 Relevant current sources and documentation inspected include:
 
 - `docs/extensions.md` and `examples/extensions/subagent/index.ts`;
@@ -108,7 +110,7 @@ separate process naturally owns a separate context window and can be started in
 the requested checkout. The public CLI provides stable controls for the
 important boundaries: `--model`, `--thinking`, `--tools`, `--exclude-tools`,
 `--no-extensions`, `--no-skills`, `--no-prompt-templates`,
-`--no-context-files`, `--no-session`, and `--mode json -p`.
+`--no-context-files`, `--no-approve`, `--no-session`, and `--mode json -p`.
 
 The adapter can use Node's standard `child_process` APIs, parse authoritative
 `message_end`/`agent_end` events, and terminate the child on the parent
@@ -155,7 +157,7 @@ Use a **one-shot Pi CLI subprocess in JSON mode**:
 ```text
 pi --mode json --print --no-session
     --no-extensions --no-skills --no-prompt-templates
-    --no-themes --no-context-files
+    --no-themes --no-context-files --no-approve
     --model <provider/id> --thinking <level>
     --tools <comma-separated-builtins>
     --exclude-tools <delegation-tool-names>
@@ -176,15 +178,18 @@ permissions of the child process.
 
 The runner resolves the current Pi executable conservatively: when the active
 Pi script is a real file it invokes it with the current Node executable; it
-otherwise falls back to the `pi` command. It uses `spawn` without a shell,
-passes the selected `cwd`, writes prompt material to a mode-0600 temporary
-file, parses UTF-8 JSONL incrementally, and removes temporary material in a
-`finally` path. The returned result contains a status, exit code, final
-assistant text, final assistant metadata when available, bounded stderr, and
-stop/error metadata. The task runtime validates the final text against the
-selected canonical result/review contract and returns that canonical output
-separately from the runtime metadata; SWE Forge remains responsible for
-interpreting status, evidence, and workflow outcomes.
+otherwise falls back to the `pi` command. For a real invocation it probes
+`--version` and fails closed outside the supported Pi line; injected commands
+remain an explicit fixture seam. It uses `spawn` without a shell, canonicalizes
+and validates the selected `cwd`, writes prompt material to a mode-0600
+temporary file, parses bounded UTF-8 JSONL incrementally, terminates the child
+process tree on cancellation, and removes temporary material in a `finally`
+path. The returned result contains a status, exit code, final assistant text,
+final assistant metadata when available, bounded stderr, bounded event-stream
+diagnostics, and stop/error metadata. The task runtime validates the final
+text against the selected canonical result/review contract and returns that
+canonical output separately from the runtime metadata; SWE Forge remains
+responsible for interpreting status, evidence, and workflow outcomes.
 
 ## Why it was selected
 
@@ -216,8 +221,8 @@ updating the Pi peer range:
 2. `--tools` is a closed allowlist after CLI parsing and
    `--exclude-tools` is applied to the resulting tool set.
 3. `--no-extensions`, `--no-skills`, `--no-prompt-templates`,
-   `--no-context-files`, and `--no-themes` prevent the corresponding discovery
-   paths in headless mode.
+   `--no-context-files`, `--no-themes`, and `--no-approve` prevent unrelated
+   project/resource loading under the current headless trust semantics.
 4. `--cwd` is not a Pi CLI flag; the process working directory is therefore
    supplied by the host process via `spawn` and Pi uses it for built-in tools
    and any remaining cwd-bound behavior.
@@ -231,9 +236,12 @@ updating the Pi peer range:
    best-effort cross-platform operation and reports aborts rather than claiming
    successful completion.
 
-The current 0.84.2 source supports all of these assumptions. The runtime keeps
-its Pi peer range compatible and covers argument construction, JSON event
-capture, cancellation, failures, and cleanup with fixture-backed tests.
+Pi 0.84.1 and 0.84.2 support these assumptions in the tested environment. The
+runtime keeps its Pi peer range conservative, probes the real child version,
+and covers argument construction, JSONL parsing, result selection, bounded
+output, cwd normalization, cancellation, failures, and cleanup with
+fixture-backed tests. Unsupported or unobservable versions fail clearly rather
+than being treated as compatible.
 
 ## Security and isolation semantics
 
