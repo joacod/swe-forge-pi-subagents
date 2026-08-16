@@ -1,7 +1,7 @@
 import { access, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { after, afterEach, before, test } from "node:test";
 import assert from "node:assert/strict";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import {
 	executeSWEForgeTask,
@@ -145,7 +145,7 @@ function childOptions(
 
 before(async () => {
 	fixturePath = join(await mkdtemp(join(tmpdir(), "swe-forge-runtime-fixture-")), "child.mjs");
-	temporaryPaths.push(fixturePath.slice(0, fixturePath.lastIndexOf("/")));
+	temporaryPaths.push(dirname(fixturePath));
 	await writeFile(fixturePath, FIXTURE_SOURCE, "utf8");
 });
 
@@ -154,7 +154,7 @@ afterEach(async () => {
 	// The fixture is recreated for the next test because afterEach also removes
 	// the directory that contains it.
 	fixturePath = join(await mkdtemp(join(tmpdir(), "swe-forge-runtime-fixture-")), "child.mjs");
-	temporaryPaths.push(fixturePath.slice(0, fixturePath.lastIndexOf("/")));
+	temporaryPaths.push(dirname(fixturePath));
 	await writeFile(fixturePath, FIXTURE_SOURCE, "utf8");
 });
 
