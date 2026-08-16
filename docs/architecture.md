@@ -1,17 +1,17 @@
 # Architecture
 
 > **Current implementation scope:** this package provides canonical SWE-Forge
-> support-root discovery and a runtime projection of canonical role and
-> contract markdown. The child execution transport described below is the
-> planned next phase and is not implemented yet.
+> support-root discovery, a runtime projection of canonical role and contract
+> markdown, and one bounded child-agent execution through the selected Pi JSON
+> subprocess mechanism.
 
 ## Project responsibility
 
 `swe-forge-pi-subagents` is a deliberately small Pi adapter for one capability:
 launch one real Pi child-agent context for SWE Forge's canonical `SUBAGENTS`
 topology and return its structured completion to the SWE Forge orchestrator.
-The adapter owns only canonical-source projection plus the future Pi
-process/session boundary and transport details:
+The adapter owns only canonical-source projection plus the Pi process/session
+boundary and transport details:
 
 - discover canonical role names and load selected role/contract markdown from
   the detected support root without copying or translating it;
@@ -159,13 +159,16 @@ pi --mode json --print --no-session
     <task>
 ```
 
-The package skeleton exposes a narrow single-child runner and a Pi extension
-tool that delegates to it. It does not expose parallel, chain, role, or
-workflow APIs. The parent supplies the task contract and role instructions as
-an explicit system-prompt append; the child uses Pi's normal built-in system
-prompt and tools but no discovered extensions, skills, templates, context
-files, or themes. This makes resource loading predictable and prevents the
-adapter's own extension from being rediscovered recursively.
+The package exposes a narrow single-task runner and a Pi extension tool that
+delegates to it. It does not expose parallel, chain, role, or workflow APIs.
+The parent supplies the task contract and role instructions as an explicit
+system-prompt append; the child uses Pi's normal built-in system prompt and
+tools but no discovered extensions, skills, templates, context files, or themes.
+The only profiles are `READ_ONLY` (`read`, `grep`, `find`, `ls`) and `WRITABLE`
+(the read-only tools plus `edit`, `write`, `bash`). This makes resource loading
+predictable and prevents the adapter's own extension from being rediscovered
+recursively. Profiles restrict model-visible Pi tools, not the operating-system
+permissions of the child process.
 
 The runner resolves the current Pi executable conservatively: when the active
 Pi script is a real file it invokes it with the current Node executable; it
@@ -174,8 +177,10 @@ passes the selected `cwd`, writes prompt material to a mode-0600 temporary
 file, parses UTF-8 JSONL incrementally, and removes temporary material in a
 `finally` path. The returned result contains a status, exit code, final
 assistant text, final assistant metadata when available, bounded stderr, and
-stop/error metadata. SWE Forge remains responsible for interpreting that text
-against its result contract.
+stop/error metadata. The task runtime validates the final text against the
+selected canonical result/review contract and returns that canonical output
+separately from the runtime metadata; SWE Forge remains responsible for
+interpreting status, evidence, and workflow outcomes.
 
 ## Why it was selected
 
@@ -184,15 +189,16 @@ against its result contract.
 - **True context separation:** the child has its own process, session, and
   model context while sharing the caller's checkout as required by
   `SUBAGENTS`.
-- **Deterministic safety controls:** an explicit built-in allowlist and
+- **Deterministic safety controls:** one of two explicit built-in profiles and
   extension/resource suppression prevent accidental tool or recursive-agent
-  inheritance. Writable tools are enabled only when the caller asks for them.
+  inheritance. A read-only profile has no shell; writable tools are enabled only
+  when the caller selects the writable profile.
 - **Low coupling:** the implementation depends on documented CLI flags and
   JSON event records plus Node standard-library process APIs, rather than
   private SDK fields or a private extension runtime.
 - **Straightforward testing:** argument construction, JSONL parsing, result
-  selection, abort handling, and cleanup can be tested without an LLM call by
-  injecting a command/invocation seam in later work.
+  selection, abort handling, contract validation, and cleanup are covered
+  without an LLM call through an injected command/invocation seam.
 - **Minimal dependencies and practical portability:** no community runtime,
   worktree library, shell wrapper, or platform-specific framework is needed.
 
@@ -221,9 +227,9 @@ updating the Pi peer range:
    best-effort cross-platform operation and reports aborts rather than claiming
    successful completion.
 
-The current 0.84.2 source supports all of these assumptions. The package
-should pin a compatible Pi peer range and add a CLI smoke test before widening
-that range.
+The current 0.84.2 source supports all of these assumptions. The runtime keeps
+its Pi peer range compatible and covers argument construction, JSON event
+capture, cancellation, failures, and cleanup with fixture-backed tests.
 
 ## Security and isolation semantics
 
@@ -231,10 +237,10 @@ that range.
   resumes nor persists a Pi conversation and cannot see the parent's messages.
 - **Filesystem:** shared by design. `cwd` points at the active project. This is
   not a sandbox and does not replace SWE Forge's `ISOLATED` worktrees.
-- **Tools:** the caller supplies a closed list of Pi built-ins. The runner
-  rejects unknown names and always excludes delegation tool names. `bash` is
-  intentionally treated as writable/privileged by policy; a read-only worker
-  must omit it, `edit`, and `write`.
+- **Tools:** the caller selects exactly one of two closed Pi built-in profiles.
+  The runner rejects unknown or mismatched tools and always excludes delegation
+  tool names. `bash` is intentionally treated as writable/privileged by policy;
+  a read-only worker omits it, `edit`, and `write`.
 - **Resources:** extensions, skills, prompt templates, themes, and context
   files are disabled. The caller's explicit system prompt is written with
   restrictive temporary-file permissions and deleted after the child exits.
@@ -259,16 +265,16 @@ that range.
    environment auth, but not an in-memory runtime key or an extension-registered
    provider unless the caller arranges an equivalent child configuration.
 2. **Process trees:** a child Pi can launch shell descendants. POSIX process
-   groups and Windows termination have different semantics; the first skeleton
-   provides conservative termination, while a later acceptance test should
-   prove no orphaned Pi/tool process remains on supported platforms.
+   groups and Windows termination have different semantics; the runtime uses a
+   detached POSIX process group and bounded termination escalation, while
+   platform-specific orphan detection remains a deployment concern.
 3. **CLI/event compatibility:** JSON event schemas and headless flags are
    documented public surfaces but still versioned with Pi. A future Pi release
    may require an adapter compatibility update.
 4. **Result size:** Pi tool output is truncated, but a long child conversation
-   can still produce large event streams. The adapter bounds stderr and keeps
-   only final result data; a future result-contract seam should add explicit
-   output limits and diagnostics without returning transcripts by default.
+   can still produce large event streams. The adapter bounds stderr and final
+   worker output and keeps only final result data; it does not return transcripts
+   by default.
 5. **Resource policy trade-off:** disabling all discovered resources maximizes
    determinism but means the child does not automatically receive repository
    `AGENTS.md` or Pi extension tools. SWE Forge must include any required
