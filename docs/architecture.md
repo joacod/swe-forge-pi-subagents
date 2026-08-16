@@ -1,5 +1,10 @@
 # Architecture
 
+> **Current implementation scope:** this package currently provides the Pi
+> package/extension skeleton and canonical SWE-Forge root discovery. The child
+> execution transport described below is the planned next phase and is not
+> implemented yet.
+
 ## Project responsibility
 
 `swe-forge-pi-subagents` is a deliberately small Pi adapter for one capability:
