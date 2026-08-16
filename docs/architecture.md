@@ -1,17 +1,22 @@
 # Architecture
 
-> **Current implementation scope:** this package currently provides the Pi
-> package/extension skeleton and canonical SWE-Forge root discovery. The child
-> execution transport described below is the planned next phase and is not
-> implemented yet.
+> **Current implementation scope:** this package provides canonical SWE-Forge
+> support-root discovery and a runtime projection of canonical role and
+> contract markdown. The child execution transport described below is the
+> planned next phase and is not implemented yet.
 
 ## Project responsibility
 
 `swe-forge-pi-subagents` is a deliberately small Pi adapter for one capability:
 launch one real Pi child-agent context for SWE Forge's canonical `SUBAGENTS`
 topology and return its structured completion to the SWE Forge orchestrator.
-The adapter owns only the Pi process/session boundary and transport details:
+The adapter owns only canonical-source projection plus the future Pi
+process/session boundary and transport details:
 
+- discover canonical role names and load selected role/contract markdown from
+  the detected support root without copying or translating it;
+- compose one bounded prompt from the selected role, supplied task contract,
+  expected output contract, and the required Pi-runtime guardrail;
 - launch a child with an explicit checkout, model, prompt, and tool allowlist;
 - keep the child conversation separate from the parent conversation;
 - collect Pi's JSON event stream into a bounded result;
@@ -26,10 +31,12 @@ result interpretation, review, integration, and acceptance.
 
 This package is not a general multi-agent framework. It does not provide:
 
-- topology selection, workflow execution, role discovery, or policy loading;
+- topology selection, workflow execution, or policy loading; canonical role
+  discovery and contract loading are projections only, not package-owned
+  definitions;
 - parallel/chain/background scheduling, queues, retries, or persistence;
 - worktrees, filesystem isolation, Git integration, or delivery automation;
-- role definitions, task/result contracts, or result validation owned by
+- role definitions, task/result contracts, or workflow behavior owned by
   SWE Forge;
 - a community subagent runtime or another orchestration dependency;
 - a sandbox or privilege boundary. Pi and its tools retain the invoking user's
