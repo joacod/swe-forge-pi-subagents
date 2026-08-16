@@ -368,6 +368,13 @@ function consumeJsonLines(
 	const decoder = new StringDecoder("utf8");
 	let buffer = "";
 	let droppingOversizedLine = false;
+	const deliverLine = (line: string) => {
+		if (line.includes("\uFFFD")) {
+			onInvalid("stdout contained invalid UTF-8 event data");
+			return;
+		}
+		onLine(line);
+	};
 	const consumeDecoded = (decoded: string) => {
 		let remaining = decoded;
 		while (remaining.length > 0) {
@@ -388,7 +395,7 @@ function consumeJsonLines(
 				if (Buffer.byteLength(line, "utf8") > MAX_EVENT_LINE_BYTES) {
 					onInvalid(`stdout event line exceeds ${MAX_EVENT_LINE_BYTES} bytes`);
 				} else {
-					onLine(line);
+					deliverLine(line);
 				}
 			}
 
@@ -416,7 +423,7 @@ function consumeJsonLines(
 				onInvalid(`stdout event line exceeds ${MAX_EVENT_LINE_BYTES} bytes`);
 				return;
 			}
-			onLine(buffer.endsWith("\r") ? buffer.slice(0, -1) : buffer);
+			deliverLine(buffer.endsWith("\r") ? buffer.slice(0, -1) : buffer);
 		}
 	});
 }

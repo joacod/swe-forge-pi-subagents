@@ -46,6 +46,7 @@ if (mode === "hang") {
   process.stdout.write(JSON.stringify({ type: "agent_end", messages: [] }) + "\n");
 } else {
   if (mode === "noise") process.stdout.write("not-json\n");
+  if (mode === "invalid-utf8") process.stdout.write(Buffer.from([123, 34, 116, 121, 112, 101, 34, 58, 34, 110, 111, 105, 115, 101, 34, 44, 34, 120, 34, 58, 34, 255, 34, 125, 10]));
   const output = mode === "review" ? ${JSON.stringify(REVIEW_OUTPUT)} : mode === "malformed" ? "STATUS: DONE\nTASK_ID: task-123\nSUMMARY: incomplete\n" : mode === "truncated" ? "STATUS: DONE\nTASK_ID: task-123\nSUMMARY: " + "x".repeat(300000) + "\nVALIDATION: fixture passed\n" : ${JSON.stringify(RESULT_OUTPUT)};
   const intermediate = { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "intermediate" }], stopReason: "toolUse" } };
   const final = { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: output }], stopReason: "stop" } };
@@ -324,6 +325,17 @@ test("fails closed on contaminated JSON output", async () => {
 
 	assert.equal(result.runtime.status, "failed");
 	assert.match(result.runtime.errorMessage ?? "", /non-JSON event line/u);
+	assert.equal(result.validation, undefined);
+});
+
+test("fails closed on invalid UTF-8 event data", async () => {
+	const root = await createCanonicalRoot();
+	const project = await createProject();
+	const recordPathValue = await recordPath();
+	const result = await executeSWEForgeTask(childOptions(root, project, recordPathValue, "invalid-utf8", "READ_ONLY"));
+
+	assert.equal(result.runtime.status, "failed");
+	assert.match(result.runtime.errorMessage ?? "", /invalid UTF-8/u);
 	assert.equal(result.validation, undefined);
 });
 
