@@ -73,32 +73,51 @@ child-agent API.
 
 ## Installation
 
-Install the package with Pi's current package mechanism. A published release
-can be installed globally with:
+This package is optional and only adds the `swe_forge_subagent` capability to
+an existing SWE-Forge Pi installation. It is not currently published to npm.
+For a complete fresh setup before npm publication, clone both repositories and
+register the package from its local path:
 
 ```bash
-pi install npm:swe-forge-pi-subagents@0.1.0
+SWE_FORGE_DIR="$HOME/tools/swe-forge"
+SUBAGENTS_DIR="$HOME/tools/swe-forge-pi-subagents"
+
+mkdir -p "$HOME/tools"
+git clone https://github.com/joacod/swe-forge.git "$SWE_FORGE_DIR"
+git clone https://github.com/joacod/swe-forge-pi-subagents.git "$SUBAGENTS_DIR"
+
+"$SWE_FORGE_DIR/scripts/swe-forge" install pi --global
+(
+  cd "$SUBAGENTS_DIR"
+  npm ci
+)
+pi install "$SUBAGENTS_DIR"
+```
+
+If SWE Forge is already installed, keep its existing installation and only
+clone the optional repository, run `npm ci` inside it, and run
+`pi install /absolute/path/to/swe-forge-pi-subagents`. The package requires
+Node.js `>=22.19.0`. These source checkouts follow `main` and are
+development-only until release artifacts are published. Restart Pi or run
+`/reload` after installing the package. The complete procedure is also
+documented in the [SWE Forge Pi installation guide](https://github.com/joacod/swe-forge/blob/main/docs/installation.md#optional-pi-subagents-backend).
+
+When an npm release becomes available, replace the source checkout and local
+path install with:
+
+```bash
+pi install npm:swe-forge-pi-subagents@<version>
 ```
 
 For a project-local Pi setting, add `-l`:
 
 ```bash
-pi install -l npm:swe-forge-pi-subagents@0.1.0
+pi install -l npm:swe-forge-pi-subagents@<version>
 ```
 
-If the release is being consumed directly from Git, Pi accepts the repository
-source (a tag or commit is preferable for reproducibility):
-
-```bash
-pi install git:github.com/joacod/swe-forge-pi-subagents
-pi install git:github.com/joacod/swe-forge-pi-subagents@<tag-or-commit>
-```
-
-For local development, Pi also accepts a package directory:
-
-```bash
-pi install /absolute/path/to/swe-forge-pi-subagents
-```
+Pi also accepts an explicitly selected Git source or another local package
+directory, but the local-path setup above is the recommended pre-publication
+installation because it avoids an unreviewed moving Git dependency.
 
 Review extension source before installing it. Pi packages and extensions run
 with the invoking user's full system permissions. Installation only adds this
