@@ -1,6 +1,6 @@
 # SWE-Forge integration contract
 
-This document defines the smallest eventual change to the main SWE-Forge Pi
+This document defines the smallest optional bridge in the main SWE-Forge Pi
 adapter. It is an integration boundary, not a replacement for the canonical
 SWE-Forge workflow. The canonical sources remain `SWE-FORGE.md`,
 `.swe-forge/workflows/`, `.swe-forge/agents/`, `.swe-forge/contracts/`, and
@@ -62,6 +62,10 @@ machine-readable result.
 
 Relevant v1 capability facts include:
 
+- `protocolVersion: 1` (independent from `packageVersion`);
+- `pi.compatibilityRange` and pre-execution version verification;
+- `isolation.contextIsolation: true`, `processIsolation: true`,
+  `filesystemIsolation: false`, and `osSandbox: false`;
 - `sweForge.installed`, `sweForge.version`, and the discovered `roles`;
 - `availableProfiles` and `profileTools` for `READ_ONLY` and `WRITABLE`;
 - `readOnlyParallelSupport: true`;
@@ -80,12 +84,10 @@ explicit, evidence-backed way to handle that condition.
 Only after the canonical workflow has selected or considered a useful bounded
 `SUBAGENTS` task may the adapter request `action: "run"`. The caller supplies:
 
-- a discovered canonical role name (`role`, or the compatibility alias
-  `roleName`);
+- a discovered canonical role name (`role`);
 - the canonical task contract (`taskContract`);
 - `expectedOutputContract: "result"` or `"review"`; and
-- `profile: "READ_ONLY"` or `"WRITABLE"` (with `access` retained only as a
-  compatibility alias).
+- `profile: "READ_ONLY"` or `"WRITABLE"`.
 
 The extension uses the current Pi checkout/model context, loads live canonical
 sources, and returns canonical output as the primary result with runtime
@@ -102,8 +104,8 @@ Filesystem isolation remains outside this package.
 
 ## Minimal adapter change
 
-The main-repository change should be limited to an optional capability path in
-its existing Pi adapter/orchestrator:
+The implemented main-repository change is limited to an optional capability
+path in its existing Pi adapter/orchestrator:
 
 1. retain the existing explicit invocation and canonical workflow unchanged;
 2. at the point where that workflow has a bounded, useful `SUBAGENTS` task,
@@ -186,7 +188,7 @@ role/contract shape or the Pi child protocol, it must coordinate a deliberate
 compatibility update; this document is not permission to silently widen either
 range.
 
-A future main-repository change may add a focused feature-detection regression
-test and one fallback test. It should not copy this package's implementation or
-canonical workflow prose into the main repository. No main SWE-Forge source is
-modified by this project.
+The main adapter now has focused feature-detection, capability-negotiation,
+fallback, and `ISOLATED` protection coverage. It does not copy this package's
+implementation or canonical workflow prose into the main repository. The
+adapter remains dependency-free: users install this package separately.

@@ -165,8 +165,10 @@ pi --mode json --print --no-session
     <task>
 ```
 
-The package exposes a narrow single-task runner and a Pi extension tool that
-delegates to it. It does not expose parallel, chain, role, or workflow APIs.
+The package exposes a narrow `executeSWEForgeTask` runner and a Pi extension
+tool that delegates to it. Capability discovery is explicitly versioned with
+`protocolVersion: 1`, independent of `packageVersion`. It does not expose
+parallel, chain, role, or workflow APIs.
 The parent supplies the task contract and role instructions as an explicit
 system-prompt append; the child uses Pi's normal built-in system prompt and
 tools but no discovered extensions, skills, templates, context files, or themes.
@@ -202,7 +204,8 @@ responsible for interpreting status, evidence, and workflow outcomes.
   required one-shot transport; the adapter does not recreate Pi's agent loop.
 - **True context separation:** the child has its own process, session, and
   model context while sharing the caller's checkout as required by
-  `SUBAGENTS`.
+  `SUBAGENTS`. The protocol advertises context/process isolation separately
+  from filesystem isolation.
 - **Deterministic safety controls:** one of two explicit built-in profiles and
   extension/resource suppression prevent accidental tool or recursive-agent
   inheritance. A read-only profile has no shell; writable tools are enabled only
@@ -242,18 +245,21 @@ updating the Pi peer range:
    successful completion.
 
 Pi 0.84.1 and 0.84.2 support these assumptions in the tested environment. The
-runtime keeps its Pi peer range conservative, probes the real child version,
-and covers argument construction, JSONL parsing, result selection, bounded
+package uses Pi's `*` peer convention while the runtime remains conservative:
+it probes the real child version and covers argument construction, JSONL
+parsing, result selection, bounded
 output, cwd normalization, cancellation, failures, and cleanup with
 fixture-backed tests. Unsupported or unobservable versions fail clearly rather
 than being treated as compatible.
 
 ## Security and isolation semantics
 
-- **Conversation:** isolated. The child uses `--no-session`, so it neither
-  resumes nor persists a Pi conversation and cannot see the parent's messages.
-- **Filesystem:** shared by design. `cwd` points at the active project. This is
-  not a sandbox and does not replace SWE Forge's `ISOLATED` worktrees.
+- **Context/process:** isolated. The child uses `--no-session` in a separate
+  Pi process, so it neither resumes nor persists a Pi conversation and cannot
+  see the parent's messages.
+- **Filesystem:** shared by design. `cwd` points at the active project. The
+  protocol reports `filesystemIsolation: false` and `osSandbox: false`; this
+  is not a sandbox and does not replace SWE Forge's `ISOLATED` worktrees.
 - **Tools:** the caller selects exactly one of two closed Pi built-in profiles.
   The runner rejects unknown or mismatched tools and always excludes delegation
   tool names. `bash` is intentionally treated as writable/privileged by policy;
@@ -274,9 +280,10 @@ than being treated as compatible.
 - **Concurrency:** each child execution acquires a local in-memory lock keyed by
   its normalized cwd. `READ_ONLY` children share the checkout, while a
   `WRITABLE` child excludes both readers and other writers until it exits. This
-  lock does not create worktrees or coordinate separate runtime processes;
-  concurrent writable work across isolated environments remains an
-  `ISOLATED` SWE Forge concern.
+  guarantee is process-local: the lock does not create worktrees or coordinate
+  separate parent Pi processes, package instances, or machines. Concurrent
+  writable work across isolated environments remains an `ISOLATED` SWE Forge
+  concern.
 
 ## Unresolved risks
 

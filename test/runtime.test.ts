@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import {
 	executeSWEForgeTask,
+	DELEGATION_TOOL_NAMES,
 	READ_ONLY_TOOLS,
 	runChildAgent,
 	getToolsForProfile,
@@ -51,8 +52,10 @@ if (mode === "hang") {
   const output = mode === "review" ? ${JSON.stringify(REVIEW_OUTPUT)} : mode === "malformed" ? "STATUS: DONE\nTASK_ID: task-123\nSUMMARY: incomplete\n" : mode === "truncated" ? "STATUS: DONE\nTASK_ID: task-123\nSUMMARY: " + "x".repeat(300000) + "\nVALIDATION: fixture passed\n" : ${JSON.stringify(RESULT_OUTPUT)};
   const intermediate = { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "intermediate" }], stopReason: "toolUse" } };
   const final = { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: output }], stopReason: "stop" } };
+  const conflicting = { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "STATUS: BLOCKED\nTASK_ID: task-123\nSUMMARY: conflicting\nVALIDATION: fixture conflict\n" }], stopReason: "stop" } };
   const ended = { type: "agent_end", messages: [final.message] };
   process.stdout.write(JSON.stringify(intermediate) + "\n");
+  if (mode === "conflicting") process.stdout.write(JSON.stringify(conflicting) + "\n");
   process.stdout.write(JSON.stringify(final) + "\n");
   process.stdout.write(JSON.stringify(ended) + "\n");
 }`;
@@ -128,7 +131,7 @@ function childOptions(
 	model = "fixture/model",
 ) {
 	return {
-		roleName: profile === "READ_ONLY" ? "reader" : "writer",
+		role: profile === "READ_ONLY" ? "reader" : "writer",
 		taskContract: TASK_CONTRACT,
 		expectedOutputContract: "result" as const,
 		profile,
@@ -171,7 +174,6 @@ test("runs a read-only role with only the READ_ONLY profile and removes prompt m
 	const record = await readRecord(recordPathValue);
 
 	assert.equal(result.output, RESULT_OUTPUT);
-	assert.equal(result.workerOutput, RESULT_OUTPUT);
 	assert.equal(result.validation?.status, "DONE");
 	assert.equal(result.runtime.status, "completed");
 	assert.equal(result.runtime.profile, "READ_ONLY");
@@ -277,6 +279,17 @@ test("loads the canonical role and output contract dynamically for each invocati
 	assert.match((await readRecord(secondRecord)).prompt ?? "", /Updated role loaded on the next call\./u);
 });
 
+test("rejects conflicting canonical worker results", async () => {
+	const root = await createCanonicalRoot();
+	const project = await createProject();
+	const recordPathValue = await recordPath();
+	const result = await executeSWEForgeTask(childOptions(root, project, recordPathValue, "conflicting", "READ_ONLY"));
+
+	assert.equal(result.runtime.status, "failed");
+	assert.match(result.runtime.eventStreamError ?? "", /conflicting canonical assistant results/u);
+	assert.equal(result.validation, undefined);
+});
+
 test("rejects a malformed worker result and still cleans up the prompt", async () => {
 	const root = await createCanonicalRoot();
 	const project = await createProject();
@@ -380,9 +393,10 @@ test("recognizes only the tested Pi compatibility line", () => {
 	assert.equal(isSupportedPiVersion("not-a-version"), false);
 });
 
-test("keeps the closed child profiles immutable", () => {
+test("keeps the closed child profiles and delegation denylist immutable", () => {
 	assert.throws(() => (READ_ONLY_TOOLS as unknown as string[]).push("bash"), TypeError);
 	assert.throws(() => (WRITABLE_TOOLS as unknown as string[]).splice(0, 1), TypeError);
+	assert.throws(() => (DELEGATION_TOOL_NAMES as unknown as string[]).push("nested_delegate"), TypeError);
 	assert.deepEqual(getToolsForProfile("READ_ONLY"), ["read", "grep", "find", "ls"]);
 	assert.deepEqual(getToolsForProfile("WRITABLE"), ["read", "grep", "find", "ls", "edit", "write", "bash"]);
 });

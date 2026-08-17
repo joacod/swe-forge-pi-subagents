@@ -103,7 +103,7 @@ test("composes only canonical sources and the five runtime guardrails", async ()
 	const root = await createCanonicalRoot();
 	const suppliedTask = "task_id: task-123\nobjective: supplied canonical task\n";
 	const prompt = await composeRuntimePrompt({
-		roleName: "implementer",
+		role: "implementer",
 		taskContract: suppliedTask,
 		expectedOutputContract: "result",
 		discovery: discovery(root),
@@ -135,7 +135,7 @@ test("composing an empty task contract is an explicit blocked runtime error", as
 	);
 	await assert.rejects(
 		composeRuntimePrompt({
-			roleName: "implementer",
+			role: "implementer",
 			taskContract: "",
 			expectedOutputContract: "result",
 			discovery: discovery(root),
