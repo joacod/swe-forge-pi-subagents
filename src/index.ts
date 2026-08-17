@@ -24,8 +24,6 @@ export {
 	READ_ONLY_TOOLS,
 	WRITABLE_TOOLS,
 	executeSWEForgeTask,
-	runSWEForgeSubagent,
-	runSWEForgeTask,
 } from "./runtime.js";
 export type {
 	BuiltinTool,
@@ -46,17 +44,12 @@ function StringEnum<T extends readonly string[]>(values: T, description: string)
 }
 
 /**
- * The tool has one deliberately small parameter surface. The roleName and
- * access fields are compatibility aliases for callers using the lower-level
- * runtime vocabulary; a call must still provide exactly one effective role
- * and profile for the `run` action.
+ * The tool has one deliberately small parameter surface. A run supplies one
+ * canonical role and one closed tool profile.
  */
 const SubagentParameters = Type.Object({
 	action: StringEnum(SWE_FORGE_SUBAGENT_ACTIONS, "Exactly one of: capabilities or run"),
 	role: Type.Optional(Type.String({ description: "Discovered canonical SWE-Forge role name" })),
-	roleName: Type.Optional(
-		Type.String({ description: "Compatibility alias for the discovered canonical SWE-Forge role name" }),
-	),
 	taskContract: Type.Optional(Type.String({ description: "Canonical bounded SWE-Forge task contract text" })),
 	expectedOutputContract: Type.Optional(
 		StringEnum(["result", "review"] as const, "Canonical output contract the child must return"),
@@ -65,12 +58,6 @@ const SubagentParameters = Type.Object({
 		StringEnum(
 			["READ_ONLY", "WRITABLE"] as const,
 			"Closed Pi tool profile. READ_ONLY is read, grep, find, ls; WRITABLE adds edit, write, bash.",
-		),
-	),
-	access: Type.Optional(
-		StringEnum(
-			["READ_ONLY", "WRITABLE"] as const,
-			"Compatibility alias for profile; it must not disagree with profile.",
 		),
 	),
 });
@@ -92,25 +79,14 @@ function inputError(code: "INVALID_ROLE_NAME" | "EMPTY_TASK_CONTRACT" | "INVALID
 	throw new SWEForgeRuntimeError(code, message);
 }
 
-function resolveAlias<T>(name: string, primary: T | undefined, alias: T | undefined): T | undefined {
-	if (primary !== undefined && alias !== undefined && primary !== alias) {
-		throw new SWEForgeRuntimeError(
-			"ACCESS_CONFLICT",
-			`Conflicting invocation metadata for ${name}; provide one matching value.`,
-			{ details: { field: name, primary, alias } },
-		);
-	}
-	return primary ?? alias;
-}
-
 function requiredRunInput(params: SubagentParameters): {
-	readonly roleName: string;
+	readonly role: string;
 	readonly taskContract: string;
 	readonly expectedOutputContract: ExpectedOutputContract;
 	readonly profile: ChildToolProfile;
 } {
-	const roleName = resolveAlias("role", params.role, params.roleName);
-	if (typeof roleName !== "string" || roleName.trim().length === 0) {
+	const role = params.role;
+	if (typeof role !== "string" || role.trim().length === 0) {
 		return inputError("INVALID_ROLE_NAME", "run requires a canonical role name.");
 	}
 	if (typeof params.taskContract !== "string" || params.taskContract.trim().length === 0) {
@@ -119,12 +95,12 @@ function requiredRunInput(params: SubagentParameters): {
 	if (params.expectedOutputContract !== "result" && params.expectedOutputContract !== "review") {
 		return inputError("INVALID_EXPECTED_OUTPUT_CONTRACT", "run requires expectedOutputContract=result or review.");
 	}
-	const profile = resolveAlias("profile", params.profile, params.access);
+	const profile = params.profile;
 	if (profile !== "READ_ONLY" && profile !== "WRITABLE") {
 		return inputError("INVALID_TOOL_PROFILE", "run requires profile=READ_ONLY or WRITABLE.");
 	}
 	return {
-		roleName,
+		role,
 		taskContract: params.taskContract,
 		expectedOutputContract: params.expectedOutputContract,
 		profile,
@@ -186,7 +162,7 @@ export default function registerSWEForgeSubagent(
 
 			const input = requiredRunInput(params);
 			const result = await executeTask({
-				roleName: input.roleName,
+				role: input.role,
 				taskContract: input.taskContract,
 				expectedOutputContract: input.expectedOutputContract,
 				profile: input.profile,

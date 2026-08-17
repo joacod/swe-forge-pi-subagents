@@ -12,7 +12,10 @@ automation.
 | Node.js | 24.15.0 in the local validation environment; package floor is 22.19.0 because the supported Pi line has that engine floor |
 | Pi package/API | `@earendil-works/pi-coding-agent` 0.84.1 from the package development install |
 | Pi CLI | 0.84.1 from the package development install; the host's separately installed Pi 0.84.2 was inspected for the same public CLI/event surfaces |
-| Pi compatibility line | `>=0.84.1 <0.85.0`; the runtime probes the real child CLI before a task and fails closed when the version cannot be read or is outside this line |
+| Pi compatibility line | `>=0.84.1 <0.85.0`; the package declares Pi core packages as `*` peers, while the runtime probes the real child CLI before a task and fails closed when the version cannot be read or is outside this line |
+| Capability protocol | `protocolVersion: 1`; independent from `packageVersion` |
+| Advertised isolation | context/process isolation true; filesystem isolation and OS sandbox false |
+| Supported profiles | `READ_ONLY`, `WRITABLE` |
 | SWE-Forge fixture | 0.1.0-alpha.1, with the live canonical root shape required by discovery |
 | SWE-Forge compatibility line | `0.1.x`; malformed or outside-line `VERSION` values fail before role/contract projection |
 | Platforms | macOS was exercised. POSIX cancellation uses a detached process group; Windows uses direct termination plus best-effort `taskkill /T /F`. Windows and Linux remain portability targets, not fully exercised release claims. |
@@ -61,6 +64,9 @@ The child has no Pi extension, skill, prompt-template, theme, context-file, or
 session inheritance. `--no-approve` follows current Pi project-trust
 semantics for the child: untrusted project-local resources are not loaded in
 headless execution. This is an input-loading control, **not** an OS sandbox.
+The capability protocol reports this explicitly as context/process isolation
+without filesystem isolation or an OS/security sandbox; workers retain the
+user's normal OS permissions.
 Pi and its built-in tools retain the invoking user's filesystem permissions,
 and the child inherits the normal environment/configuration needed for model
 authentication. Do not run this adapter on an untrusted project without a
@@ -68,8 +74,9 @@ real OS/container/VM boundary.
 
 JSONL parsing requires authoritative `message_end`/`agent_end` records. Plain
 stdout noise, malformed event lines, oversized event lines, stream errors,
-non-zero exits, missing assistant results, and truncated assistant output are
-reported as failed runtime evidence. Stderr is retained only as bounded
+non-zero exits, missing assistant results, truncated assistant output, and
+conflicting canonical assistant results are reported as failed runtime
+evidence. Stderr is retained only as bounded
 process diagnostics; it is not treated as a worker result. A canonical
 `BLOCKED` or `FAILED` result remains data with that status and is never upgraded
 by the adapter.
@@ -100,12 +107,46 @@ restrict arbitrary OS access outside those tools.
 
 Pi core packages are peers and are not bundled. `typebox` is a runtime peer for
 the tool schema; `@earendil-works/pi-coding-agent` is the typed Pi extension
-peer. No community subagent runtime or other production dependency is needed.
-The package declares the tested Pi peer line rather than `*`, and the build,
-test, lint, and format checks use the existing TypeScript/Node toolchain
-without adding an unneeded formatter or linter dependency.
+peer. Both use the Pi convention of a `*` peer range; the runtime compatibility
+check is the actual guard for the tested `>=0.84.1 <0.85.0` window. No community
+subagent runtime or other production dependency is needed. The build, test,
+lint, and format checks use the existing TypeScript/Node toolchain without
+adding an unneeded formatter or linter dependency.
+
+`projection.ts` intentionally validates a minimal duplicated wire shape because
+SWE-Forge does not currently publish a small versioned schema export. This is
+deferred technical debt: validation remains fail-closed until a low-coupling
+canonical schema boundary exists.
 
 When updating Pi or SWE-Forge, rerun the repository tests, package-install
 smoke test, and a fixture-backed child invocation. If a public flag, event
 shape, trust behavior, or canonical contract changes, update the compatibility
 policy and adapter deliberately; do not guess or silently widen the ranges.
+
+## Real cross-repository acceptance
+
+The release harness is opt-in because A-D require a configured model and may
+write the disposable checkout used by Scenario C:
+
+```bash
+cd /path/to/swe-forge
+scripts/swe-forge install pi --global
+scripts/swe-forge verify pi --global
+
+cd /path/to/swe-forge-pi-subagents
+npm install
+pi install /path/to/swe-forge-pi-subagents
+npm run build
+SWE_FORGE_ACCEPTANCE_MODEL=provider/model \\
+  SWE_FORGE_ACCEPTANCE_REPO=/path/to/swe-forge \\
+  SWE_FORGE_ACCEPTANCE_PACKAGE=/path/to/swe-forge-pi-subagents/src/index.ts \\
+  npm run acceptance -- --scenario all
+```
+
+The harness creates temporary run state and checkouts, exercises real Pi and
+canonical SWE-Forge capability negotiation for A-D, and removes those paths by
+default. E uses the built runtime with malformed child output; F runs the
+Pi-adapter fixture that proves `ISOLATED` protection. Run an individual
+scenario with `--scenario A` through `--scenario F`. Without
+`SWE_FORGE_ACCEPTANCE_MODEL`, A-D are reported as skipped unless
+`SWE_FORGE_ACCEPTANCE_REQUIRED=1` is set.

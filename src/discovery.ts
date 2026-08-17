@@ -61,9 +61,6 @@ export class SWEForgeInstallationError extends Error {
 	}
 }
 
-/** Backwards-compatible descriptive alias for callers that prefer discovery terminology. */
-export { SWEForgeInstallationError as SWEForgeDiscoveryError };
-
 export interface SWEForgeInstallation {
 	/** The normalized, real support-root path. */
 	readonly root: string;
@@ -289,9 +286,6 @@ export async function discoverSWEForgeInstallation(
 		},
 	};
 }
-
-/** Alias emphasizing that the result is a validated root record, not a copy. */
-export const discoverSWEForgeRoot = discoverSWEForgeInstallation;
 
 export function isSWEForgeInstallationError(error: unknown): error is SWEForgeInstallationError {
 	return error instanceof SWEForgeInstallationError;

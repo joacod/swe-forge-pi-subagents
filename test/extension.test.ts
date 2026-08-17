@@ -148,11 +148,15 @@ after(async () => {
 	await rm(fixtureDirectory, { recursive: true, force: true });
 });
 
-test("keeps generic transport helpers out of the package entry point", () => {
+test("keeps generic transport helpers and compatibility aliases out of the package entry point", () => {
 	assert.equal("runChildAgent" in packageEntry, false);
 	assert.equal("buildChildArgs" in packageEntry, false);
 	assert.equal("resolvePiInvocation" in packageEntry, false);
 	assert.equal("CheckoutScheduler" in packageEntry, false);
+	assert.equal("runSWEForgeTask" in packageEntry, false);
+	assert.equal("runSWEForgeSubagent" in packageEntry, false);
+	assert.equal("discoverSWEForgeCapabilities" in packageEntry, false);
+	assert.equal("workerOutput" in packageEntry, false);
 });
 
 test("registers exactly the Forge-specific tool and v1 actions", () => {
@@ -176,8 +180,20 @@ test("returns machine-readable capabilities without workflow or provider decisio
 	const details = result.details as Awaited<ReturnType<typeof getSWEForgeCapabilities>>;
 
 	assert.equal(result.isError, undefined);
-	assert.equal(details.extensionVersion, "0.1.0");
+	assert.equal(details.protocolVersion, 1);
 	assert.equal(details.packageVersion, "0.1.0");
+	assert.equal("extensionVersion" in details, false);
+	assert.deepEqual(details.pi, {
+		compatibilityRange: ">=0.84.1 <0.85.0",
+		versionVerification: "before_execution",
+	});
+	assert.deepEqual(details.isolation, {
+		contextIsolation: true,
+		processIsolation: true,
+		filesystemIsolation: false,
+		osSandbox: false,
+	});
+	assert.deepEqual(details.trust, { workerPermissions: "user_os_permissions", sandbox: false });
 	assert.equal(details.sweForge.version, "0.1.0-alpha.1");
 	assert.equal(details.sweForge.root, await realpath(root));
 	assert.deepEqual(details.roles, ["reader", "writer"]);
@@ -189,6 +205,18 @@ test("returns machine-readable capabilities without workflow or provider decisio
 	assert.equal("provider" in details, false);
 	assert.equal("workflow" in details, false);
 	assert.deepEqual(JSON.parse(result.content[0].text), details);
+	assert.throws(() => ((details as unknown as { packageVersion: string }).packageVersion = "mutated"), TypeError);
+	assert.throws(() => (details.roles as unknown as string[]).push("mutated"), TypeError);
+	assert.throws(() => (details.availableProfiles as unknown as string[]).push("OTHER"), TypeError);
+	assert.throws(() => (details.profileTools.READ_ONLY as unknown as string[]).push("bash"), TypeError);
+	assert.throws(() => ((details.pi as unknown as { compatibilityRange: string }).compatibilityRange = "*"), TypeError);
+	assert.throws(() => ((details.isolation as unknown as { contextIsolation: boolean }).contextIsolation = false), TypeError);
+	assert.throws(() => (details.compatibilityErrors as unknown as unknown[]).push({}), TypeError);
+	assert.throws(() => ((details.sweForge as unknown as { installed: boolean }).installed = false), TypeError);
+
+	const future = await getSWEForgeCapabilities(discovery(root));
+	assert.equal(future.protocolVersion, 1);
+	assert.deepEqual(future.profileTools.READ_ONLY, ["read", "grep", "find", "ls"]);
 });
 
 test("runs one valid read-only task with canonical output as primary content", async () => {
@@ -218,7 +246,7 @@ test("runs one valid read-only task with canonical output as primary content", a
 	assert.equal(result.details.validation.status, "DONE");
 });
 
-test("runs one valid writable task and accepts the profile alias", async () => {
+test("runs one valid writable task with the canonical profile", async () => {
 	const root = await createCanonicalRoot();
 	const project = await createProject();
 	const tool = registerTool(withFixture(root, "success"));
@@ -226,10 +254,10 @@ test("runs one valid writable task and accepts the profile alias", async () => {
 		"run-writable",
 		{
 			action: "run",
-			roleName: "writer",
+			role: "writer",
 			taskContract: TASK_CONTRACT,
 			expectedOutputContract: "result",
-			access: "WRITABLE",
+			profile: "WRITABLE",
 		},
 		undefined,
 		undefined,

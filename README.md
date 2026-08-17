@@ -30,11 +30,12 @@ installation at `~/.pi/agent/swe-forge/`, including `SWE-FORGE.md`, `AGENTS.md`,
 `VERSION`, and `.swe-forge/`. It does not install, copy, bundle, translate, or
 redefine those sources. The canonical workflow may feature-detect this package
 when it has selected or is considering `SUBAGENTS`; when it is absent,
-SWE-Forge continues with its normal SOLO/sequential fallback. This repository
-does not modify the main adapter or wire that optional path in automatically.
+SWE-Forge continues with its normal SOLO/sequential fallback. The main Pi
+adapter feature-detects the tool and negotiates its capabilities without
+importing this package.
 
 This package must not be used as a replacement for the main SWE-Forge
-repository. The eventual adapter integration is documented in
+repository. The adapter integration boundary is documented in
 [`docs/swe-forge-integration.md`](docs/swe-forge-integration.md).
 
 ## Relationship to Pi
@@ -44,7 +45,10 @@ registers one tool, `swe_forge_subagent`, and uses Pi's documented one-shot JSON
 CLI to create a separate child process/context. Pi supplies the host runtime,
 model/auth configuration, built-in tools, package loading, and process
 permissions; this package supplies only the bounded child boundary and
-canonical-source projection.
+canonical-source projection. It is built using Pi's documented extension and
+CLI primitives and follows the subprocess-based context-isolation approach
+used by Pi's official subagent example; it does not depend on a private
+`Subagent` SDK.
 
 Installing the package does **not** activate SWE-Forge. SWE-Forge remains
 explicitly invoked, for example:
@@ -59,9 +63,12 @@ The extension does not intercept `/swe-forge`, select `SOLO`/`SUBAGENTS`/
 capability available to Pi; the canonical SWE-Forge adapter decides whether to
 use it.
 
-The package entry point exposes the canonical projection helpers and one
-SWE-Forge task runner. Low-level Pi transport, argument-building, and checkout
-lock helpers are implementation details and are not re-exported as a generic
+The canonical public task API is `executeSWEForgeTask` with task fields
+`role` and `profile`; its result has `output`, `runtime`, and `validation`.
+Capability discovery is `getSWEForgeCapabilities`, whose `packageVersion` is
+implementation metadata and whose `protocolVersion` is the independent wire
+contract version. Low-level Pi transport, argument-building, and checkout-lock
+helpers are implementation details and are not re-exported as a generic
 child-agent API.
 
 ## Installation
@@ -120,12 +127,13 @@ does not modify the main SWE-Forge repository.
 The tool exposes exactly two actions:
 
 - `action: "capabilities"` returns machine-readable observed support, the
-  discovered canonical roles, compatibility errors, the closed tool profiles,
-  read-only overlap support, and the fact that writable concurrency and nested
-  delegation are unsupported.
-- `action: "run"` executes exactly one bounded task. The caller supplies a
-  discovered canonical role name, a canonical task contract, either the
-  `result` or `review` output contract, and `READ_ONLY` or `WRITABLE`.
+  protocol version, Pi compatibility metadata, explicit context/process and
+  trust semantics, discovered canonical roles, compatibility errors, the
+  closed tool profiles, read-only overlap support, and the fact that writable
+  concurrency and nested delegation are unsupported.
+- `action: "run"` executes exactly one bounded task. The caller supplies
+  `role`, `taskContract`, `expectedOutputContract` (`result` or `review`), and
+  `profile` (`READ_ONLY` or `WRITABLE`).
 
 A run loads the selected role and expected output contract live, composes one
 explicit prompt, starts one fresh Pi JSON subprocess, returns canonical output
@@ -158,9 +166,12 @@ extension/skill/template/theme/context-file loading. Its process working
 directory is still the caller's normalized checkout. Filesystem state is
 therefore shared by design.
 
-This package does not provide worktrees, containers, VMs, or an OS sandbox.
-SWE-Forge `ISOLATED` execution and worktree lifecycle remain outside this
-package.
+The advertised semantics are explicit: `contextIsolation: true`,
+`processIsolation: true`, `filesystemIsolation: false`, and `osSandbox: false`.
+Workers run with the user's OS permissions (`workerPermissions:
+user_os_permissions`). This package does not provide worktrees, containers,
+VMs, or an OS/security sandbox. SWE-Forge `ISOLATED` execution and worktree
+lifecycle remain outside this package.
 
 ## Parallel readers / exclusive writer rule
 
@@ -224,7 +235,9 @@ are bundled in this package.
 | Node.js | `>=22.19.0` |
 | Pi CLI/package | `>=0.84.1 <0.85.0` |
 | SWE-Forge | `0.1.x` (minimum tested `0.1.0-alpha.1`) |
-| Runtime dependencies | Pi core packages and `typebox` as peers; no production community subagent dependency |
+| Runtime dependencies | Pi core packages and `typebox` as `*` peers supplied by Pi; no production community subagent dependency |
+| Protocol | `protocolVersion: 1`; `packageVersion` is not used as the protocol version |
+| Supported profiles | `READ_ONLY`, `WRITABLE` |
 | Exercised platform | macOS with Node 24.15.0; Linux and Windows are portability targets, not fully exercised release claims |
 
 The child probes a real Pi CLI version and fails closed when it cannot verify
@@ -297,9 +310,15 @@ npm run typecheck
 npm run lint
 npm run format:check
 npm run build
+npm run acceptance -- --help
 ```
 
 Tests use temporary fake SWE-Forge installations and injected Pi commands.
+The opt-in acceptance harness uses a real Pi process, the installed SWE-Forge
+support root, and this package when `SWE_FORGE_ACCEPTANCE_MODEL` is set; it also
+covers fallback, malformed output, and topology protection. See
+[`scripts/acceptance.mjs`](scripts/acceptance.mjs) and
+[`docs/compatibility.md`](docs/compatibility.md) for setup.
 For development-only canonical-root experiments, set `SWE_FORGE_ROOT` to an
 explicit fixture/support root; invalid overrides do not fall back elsewhere.
 The package's production behavior always reads the canonical user-level root.
@@ -318,4 +337,4 @@ Further technical detail:
 - [`docs/compatibility.md`](docs/compatibility.md) — tested compatibility and
   trust boundary
 - [`docs/swe-forge-integration.md`](docs/swe-forge-integration.md) — minimal
-  contract for the eventual main-repository adapter change
+  contract and behavior of the optional main-repository adapter bridge

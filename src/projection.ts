@@ -104,7 +104,7 @@ export interface CanonicalContract {
 
 export interface RuntimePromptInput {
 	/** The canonical role name, not a filesystem path. */
-	readonly roleName: string;
+	readonly role: string;
 	/** Markdown supplied by the caller from the canonical task contract loader. */
 	readonly taskContract: string;
 	readonly expectedOutputContract: ExpectedOutputContract;
@@ -260,11 +260,22 @@ async function readRoleNamesAt(installation: SWEForgeInstallation): Promise<read
 	return roleNames.sort((left, right) => left.localeCompare(right));
 }
 
+/**
+ * Minimal local wire-shape checks for the SWE-Forge 0.1.x contracts.
+ *
+ * SWE-Forge currently does not publish a versioned schema package that can be
+ * imported without coupling this primitive to its workflow repository. Keep
+ * these duplicated fields deliberately small and fail closed when the live
+ * contract or result drifts; revisit this boundary when such a schema exists.
+ */
 const REQUIRED_CANONICAL_CONTRACT_FIELDS: Record<CanonicalContractName, readonly string[]> = {
 	task: ["task_id", "objective"],
 	result: ["STATUS", "SUMMARY", "VALIDATION"],
 	review: ["status", "review_focus", "findings"],
 };
+
+const CANONICAL_RESULT_STATUSES = Object.freeze(["DONE", "BLOCKED", "FAILED"] as const);
+const CANONICAL_REVIEW_STATUSES = Object.freeze(["PASS", "CHANGES_REQUIRED"] as const);
 
 function validateCanonicalContractMarkdown(
 	contractName: CanonicalContractName,
@@ -572,9 +583,9 @@ export function validateCanonicalOutput(
 		);
 	}
 	const allowedStatuses = expectedOutputContract === "result"
-		? ["DONE", "BLOCKED", "FAILED"]
-		: ["PASS", "CHANGES_REQUIRED"];
-	if (!allowedStatuses.includes(status.toUpperCase())) {
+		? CANONICAL_RESULT_STATUSES
+		: CANONICAL_REVIEW_STATUSES;
+	if (!(allowedStatuses as readonly string[]).includes(status.toUpperCase())) {
 		throw new SWEForgeRuntimeError(
 			"INVALID_STATUS",
 			`The ${expectedOutputContract} output contains unsupported STATUS ${JSON.stringify(status)}.`,
@@ -637,7 +648,7 @@ export async function composeRuntimePrompt(input: RuntimePromptInput): Promise<s
 		);
 	}
 	const installation = await discoverSWEForgeInstallation(input.discovery);
-	const role = await loadCanonicalRoleAt(input.roleName, installation);
+	const role = await loadCanonicalRoleAt(input.role, installation);
 	const outputContract = await loadCanonicalContractAt(input.expectedOutputContract, installation);
 
 	return [
@@ -661,8 +672,3 @@ export async function composeRuntimePrompt(input: RuntimePromptInput): Promise<s
 		`- Return the required canonical ${input.expectedOutputContract} contract.`,
 	].join("\n");
 }
-
-/** Compatibility-friendly aliases that retain the canonical-source semantics. */
-export const discoverCanonicalRoles = discoverCanonicalRoleNames;
-export const loadSWEForgeRole = loadCanonicalRole;
-export const validateWorkerOutput = validateCanonicalOutput;

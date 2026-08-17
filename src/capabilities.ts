@@ -9,9 +9,41 @@ import {
 import { discoverCanonicalRoleNames, isSWEForgeRuntimeError } from "./projection.js";
 import {
 	CHILD_TOOL_PROFILES,
+	PI_COMPATIBILITY_POLICY,
 	type BuiltinTool,
 	type ChildToolProfile,
 } from "./runtime.js";
+
+/** The wire protocol version negotiated independently from the package version. */
+export const SWE_FORGE_SUBAGENT_PROTOCOL_VERSION = 1 as const;
+
+/**
+ * Execution semantics advertised to the SWE-Forge adapter.
+ *
+ * These values describe context/process separation only. The child still uses
+ * the caller's checkout and OS permissions; this is not a filesystem or OS
+ * sandbox.
+ */
+export const SWE_FORGE_SUBAGENT_ISOLATION = Object.freeze({
+	contextIsolation: true,
+	processIsolation: true,
+	filesystemIsolation: false,
+	osSandbox: false,
+} as const);
+
+/** The trust boundary for writable child execution. */
+export const SWE_FORGE_SUBAGENT_TRUST = Object.freeze({
+	workerPermissions: "user_os_permissions",
+	sandbox: false,
+} as const);
+
+/** Pi compatibility metadata; the actual CLI version is checked before a run. */
+export const SWE_FORGE_SUBAGENT_PI = Object.freeze({
+	compatibilityRange: PI_COMPATIBILITY_POLICY.range,
+	versionVerification: "before_execution",
+} as const);
+
+const AVAILABLE_PROFILES = Object.freeze(["READ_ONLY", "WRITABLE"] as const);
 
 /** Fallback used only when a package manifest is unavailable in a test build. */
 export const SWE_FORGE_SUBAGENT_PACKAGE_VERSION = "0.1.0";
@@ -22,8 +54,11 @@ export interface SWEForgeCompatibilityError {
 }
 
 export interface SWEForgeCapabilities {
-	readonly extensionVersion: string;
+	readonly protocolVersion: typeof SWE_FORGE_SUBAGENT_PROTOCOL_VERSION;
 	readonly packageVersion: string;
+	readonly pi: typeof SWE_FORGE_SUBAGENT_PI;
+	readonly isolation: typeof SWE_FORGE_SUBAGENT_ISOLATION;
+	readonly trust: typeof SWE_FORGE_SUBAGENT_TRUST;
 	readonly sweForge: {
 		readonly installed: boolean;
 		readonly version?: string;
@@ -33,7 +68,7 @@ export interface SWEForgeCapabilities {
 	readonly readOnlyParallelSupport: true;
 	readonly writableConcurrencySupport: false;
 	readonly nestedDelegationSupport: false;
-	readonly availableProfiles: readonly ChildToolProfile[];
+	readonly availableProfiles: typeof AVAILABLE_PROFILES;
 	readonly profileTools: Readonly<Record<ChildToolProfile, readonly BuiltinTool[]>>;
 	readonly compatibilityErrors: readonly SWEForgeCompatibilityError[];
 }
@@ -76,45 +111,70 @@ async function readPackageVersion(): Promise<string> {
 }
 
 function profileTools(): Readonly<Record<ChildToolProfile, readonly BuiltinTool[]>> {
+	return Object.freeze({
+		READ_ONLY: CHILD_TOOL_PROFILES.READ_ONLY,
+		WRITABLE: CHILD_TOOL_PROFILES.WRITABLE,
+	});
+}
+
+function freezeErrors(errors: readonly SWEForgeCompatibilityError[]): readonly SWEForgeCompatibilityError[] {
+	return Object.freeze(errors.map((error) => Object.freeze({ ...error })));
+}
+
+function capabilityResult(
+	base: Omit<SWEForgeCapabilities, "sweForge" | "roles" | "compatibilityErrors">,
+	sweForge: SWEForgeCapabilities["sweForge"],
+	roles: readonly string[],
+	errors: readonly SWEForgeCompatibilityError[],
+): SWEForgeCapabilities {
+	return Object.freeze({
+		...base,
+		sweForge: Object.freeze({ ...sweForge }),
+		roles: Object.freeze([...roles]),
+		compatibilityErrors: freezeErrors(errors),
+	});
+}
+
+function baseCapabilities(packageVersion: string) {
 	return {
-		READ_ONLY: [...CHILD_TOOL_PROFILES.READ_ONLY],
-		WRITABLE: [...CHILD_TOOL_PROFILES.WRITABLE],
+		protocolVersion: SWE_FORGE_SUBAGENT_PROTOCOL_VERSION,
+		packageVersion,
+		pi: SWE_FORGE_SUBAGENT_PI,
+		isolation: SWE_FORGE_SUBAGENT_ISOLATION,
+		trust: SWE_FORGE_SUBAGENT_TRUST,
+		readOnlyParallelSupport: true as const,
+		writableConcurrencySupport: false as const,
+		nestedDelegationSupport: false as const,
+		availableProfiles: AVAILABLE_PROFILES,
+		profileTools: profileTools(),
 	};
 }
 
 /**
  * Report only observed runtime capabilities. This is a capability probe, not
- * a topology, provider, or workflow decision.
+ * a topology, provider, or workflow decision. Pi CLI compatibility is checked
+ * by the task runner immediately before execution, not during this probe.
  */
 export async function getSWEForgeCapabilities(
 	discovery: SWEForgeDiscoveryOptions = {},
 ): Promise<SWEForgeCapabilities> {
 	const packageVersion = await readPackageVersion();
-	const profiles = profileTools();
-	const base = {
-		extensionVersion: packageVersion,
-		packageVersion,
-		roles: [] as readonly string[],
-		readOnlyParallelSupport: true as const,
-		writableConcurrencySupport: false as const,
-		nestedDelegationSupport: false as const,
-		availableProfiles: ["READ_ONLY", "WRITABLE"] as const,
-		profileTools: profiles,
-	};
+	const base = baseCapabilities(packageVersion);
 
 	let installation;
 	try {
 		installation = await discoverSWEForgeInstallation(discovery);
 	} catch (error) {
 		const installationError = isSWEForgeInstallationError(error) ? error : undefined;
-		return {
-			...base,
-			sweForge: {
+		return capabilityResult(
+			base,
+			{
 				installed: false,
 				...(installationError?.root === undefined ? {} : { root: installationError.root }),
 			},
-			compatibilityErrors: [compatibilityError(error)],
-		};
+			[],
+			[compatibilityError(error)],
+		);
 	}
 
 	let roles: readonly string[] = [];
@@ -125,17 +185,14 @@ export async function getSWEForgeCapabilities(
 		compatibilityErrors.push(compatibilityError(error));
 	}
 
-	return {
-		...base,
-		roles,
-		sweForge: {
+	return capabilityResult(
+		base,
+		{
 			installed: true,
 			version: installation.version,
 			root: installation.root,
 		},
+		roles,
 		compatibilityErrors,
-	};
+	);
 }
-
-/** Compatibility-friendly alias for callers that use discovery terminology. */
-export const discoverSWEForgeCapabilities = getSWEForgeCapabilities;

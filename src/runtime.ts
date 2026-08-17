@@ -122,7 +122,7 @@ export interface BuildChildArgsOptions {
 
 export interface SWEForgeTaskOptions {
 	/** A discovered canonical role name, never a path. */
-	readonly roleName: string;
+	readonly role: string;
 	/** The canonical task contract text supplied by the Forge orchestrator. */
 	readonly taskContract: string;
 	readonly expectedOutputContract: ExpectedOutputContract;
@@ -143,7 +143,7 @@ interface InternalSWEForgeTaskOptions extends SWEForgeTaskOptions {
 }
 
 export interface SWEForgeTaskRuntimeMetadata extends ChildAgentResult {
-	readonly roleName: string;
+	readonly role: string;
 	readonly expectedOutputContract: ExpectedOutputContract;
 	readonly profile: ChildToolProfile;
 	readonly tools: readonly BuiltinTool[];
@@ -160,9 +160,6 @@ export interface SWEForgeTaskResult {
 	/** Runtime/process evidence is deliberately separate from canonical output. */
 	readonly runtime: SWEForgeTaskRuntimeMetadata;
 	readonly validation: CanonicalOutputValidation | undefined;
-	/** Compatibility aliases for callers that use worker-oriented terminology. */
-	readonly workerOutput: string;
-	readonly metadata: SWEForgeTaskRuntimeMetadata;
 }
 
 interface ChildEvent extends JsonObject {
@@ -177,6 +174,7 @@ interface ChildProcessOutcome {
 interface ChildState {
 	assistantMessage?: JsonObject;
 	text: string;
+	canonicalTexts: string[];
 	stopReason?: string;
 	errorMessage?: string;
 	agentEnded: boolean;
@@ -496,6 +494,19 @@ function waitForProcess(child: ChildProcess): Promise<ChildProcessOutcome> {
 	});
 }
 
+function recordCanonicalCandidate(text: string, state: ChildState): void {
+	if (
+		!/^\s*status\s*:/imu.test(text) ||
+		!/(^|\n)\s*(?:summary|validation|review_focus|findings)\s*:/imu.test(text)
+	) {
+		return;
+	}
+	if (!state.canonicalTexts.includes(text)) state.canonicalTexts.push(text);
+	if (state.canonicalTexts.length > 1) {
+		state.eventStreamError ??= "stdout contained conflicting canonical assistant results";
+	}
+}
+
 function applyAssistantMessage(message: JsonObject, state: ChildState): void {
 	if (message.role !== "assistant") return;
 
@@ -505,6 +516,7 @@ function applyAssistantMessage(message: JsonObject, state: ChildState): void {
 	state.outputTruncated = bounded.truncated;
 	state.stopReason = asNonEmptyString(message.stopReason);
 	state.errorMessage = asNonEmptyString(message.errorMessage);
+	recordCanonicalCandidate(bounded.value, state);
 }
 
 function textFromMessage(message: JsonObject): string {
@@ -764,6 +776,7 @@ async function runPiChildAgentUnlocked(
 		: resolvePiInvocation();
 	const state: ChildState = {
 		text: "",
+		canonicalTexts: [],
 		agentEnded: false,
 		outputTruncated: false,
 	};
@@ -916,7 +929,7 @@ export function runChildAgent(options: SWEForgeTaskOptions): Promise<SWEForgeTas
 export function runChildAgent(
 	options: ChildAgentOptions | SWEForgeTaskOptions,
 ): Promise<ChildAgentResult | SWEForgeTaskResult> {
-	if ("roleName" in options) return executeSWEForgeTask(options);
+	if ("role" in options) return executeSWEForgeTask(options);
 	return runPiChildAgent(options);
 }
 
@@ -929,7 +942,7 @@ function runtimeMetadata(
 ): SWEForgeTaskRuntimeMetadata {
 	return {
 		...child,
-		roleName: options.roleName,
+		role: options.role,
 		expectedOutputContract: options.expectedOutputContract,
 		profile,
 		tools: getToolsForProfile(profile),
@@ -984,7 +997,7 @@ export async function executeSWEForgeTask(options: SWEForgeTaskOptions): Promise
 		expectedWriteAccess: internalOptions.profile,
 	});
 	const prompt = await composeRuntimePrompt({
-		roleName: internalOptions.roleName,
+		role: internalOptions.role,
 		taskContract: internalOptions.taskContract,
 		expectedOutputContract: internalOptions.expectedOutputContract,
 		discovery: internalOptions.discovery,
@@ -1009,8 +1022,6 @@ export async function executeSWEForgeTask(options: SWEForgeTaskOptions): Promise
 			output: child.text,
 			runtime,
 			validation: undefined,
-			workerOutput: child.text,
-			metadata: runtime,
 		};
 	}
 
@@ -1023,14 +1034,8 @@ export async function executeSWEForgeTask(options: SWEForgeTaskOptions): Promise
 			output: child.text,
 			runtime,
 			validation,
-			workerOutput: child.text,
-			metadata: runtime,
 		};
 	} catch (error) {
 		return rethrowWithRuntimeDetails(error, runtime, child.text);
 	}
 }
-
-/** Compatibility-friendly aliases for the single-task runtime. */
-export const runSWEForgeTask = executeSWEForgeTask;
-export const runSWEForgeSubagent = executeSWEForgeTask;
