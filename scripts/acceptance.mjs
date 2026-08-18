@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { resolveAcceptanceModel } from "./acceptance-model.mjs";
 
 const execFileAsync = promisify(execFile);
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -15,7 +16,7 @@ const mainAdapter = process.env.SWE_FORGE_ACCEPTANCE_ADAPTER ?? join(homedir(), 
 const canonicalTemplate = process.env.SWE_FORGE_ACCEPTANCE_PROMPT ?? join(homedir(), ".pi", "agent", "prompts", "swe-forge.md");
 const packageExtension = process.env.SWE_FORGE_ACCEPTANCE_PACKAGE ?? join(packageRoot, "src", "index.ts");
 const requestedScenario = process.argv[process.argv.indexOf("--scenario") + 1] ?? "all";
-const model = process.env.SWE_FORGE_ACCEPTANCE_MODEL;
+const model = resolveAcceptanceModel();
 const keepTemp = process.env.SWE_FORGE_ACCEPTANCE_KEEP_TEMP === "1";
 const scenarios = new Set(["A", "B", "C", "D", "E", "F", "all"]);
 
@@ -26,8 +27,11 @@ Runs the opt-in release acceptance path. A-D use a real Pi process, the live
 SWE-Forge support root, and the optional package; E uses a malformed child
 stream and F runs the adapter topology-protection fixture.
 
-Required for A-D:
-  SWE_FORGE_ACCEPTANCE_MODEL=provider/model
+Model resolution for A-D:
+  SWE_FORGE_ACCEPTANCE_MODEL=provider/model  # optional explicit override
+  Otherwise, non-empty PI_PROVIDER plus PI_MODEL become provider/model when
+  launched from the current Pi Bash session. Ordinary terminal/CI runs may
+  still need SWE_FORGE_ACCEPTANCE_MODEL explicitly.
 
 Optional:
   SWE_FORGE_ACCEPTANCE_PACKAGE=/path/to/installed-or-source-package/src/index.ts
@@ -155,9 +159,8 @@ async function runPi({ id, topology, packageEnabled, ticket, tools = packageEnab
 		promptPath,
 		"--thinking",
 		"off",
-		"--model",
-		model,
 	];
+	if (model) args.push("--model", model);
 	if (packageEnabled) args.push("-e", packageExtension);
 	if (tools) args.push("--tools", tools);
 	else args.push("--no-tools");
@@ -336,7 +339,8 @@ async function main() {
 	if (selected("F")) await scenarioF();
 	const realRequested = ["A", "B", "C", "D"].some(selected);
 	if (realRequested && !model) {
-		const message = "Scenarios A-D skipped: set SWE_FORGE_ACCEPTANCE_MODEL=provider/model to run real Pi/model acceptance.";
+		const message =
+			"Scenarios A-D skipped: set SWE_FORGE_ACCEPTANCE_MODEL=provider/model or provide non-empty PI_PROVIDER and PI_MODEL from a Pi Bash session to run real Pi/model acceptance.";
 		if (process.env.SWE_FORGE_ACCEPTANCE_REQUIRED === "1") throw new Error(message);
 		console.log(`SKIP: ${message}`);
 		return;
