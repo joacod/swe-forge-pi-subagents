@@ -27,11 +27,14 @@ Runs the opt-in release acceptance path. A-D use a real Pi process, the live
 SWE-Forge support root, and the optional package; E uses a malformed child
 stream and F runs the adapter topology-protection fixture.
 
-Model resolution for A-D:
-  SWE_FORGE_ACCEPTANCE_MODEL=provider/model  # optional explicit override
-  Otherwise, non-empty PI_PROVIDER plus PI_MODEL become provider/model when
-  launched from the current Pi Bash session. Ordinary terminal/CI runs may
-  still need SWE_FORGE_ACCEPTANCE_MODEL explicitly.
+Model resolution for A-D (highest priority first):
+  SWE_FORGE_ACCEPTANCE_MODEL=provider/model
+  PI_PROVIDER=provider PI_MODEL=model
+  Pi settings.json: defaultProvider + defaultModel
+    Uses PI_CODING_AGENT_DIR when non-empty, otherwise $HOME/.pi/agent.
+  Pi settings are read-only fallback configuration; authentication is still
+  required for every real-model run. CI can set PI_CODING_AGENT_DIR to its
+  settings directory.
 
 Optional:
   SWE_FORGE_ACCEPTANCE_PACKAGE=/path/to/installed-or-source-package/src/index.ts
@@ -340,7 +343,7 @@ async function main() {
 	const realRequested = ["A", "B", "C", "D"].some(selected);
 	if (realRequested && !model) {
 		const message =
-			"Scenarios A-D skipped: set SWE_FORGE_ACCEPTANCE_MODEL=provider/model or provide non-empty PI_PROVIDER and PI_MODEL from a Pi Bash session to run real Pi/model acceptance.";
+			"Scenarios A-D skipped: configure SWE_FORGE_ACCEPTANCE_MODEL, PI_PROVIDER + PI_MODEL, or defaultProvider + defaultModel in Pi settings.json (PI_CODING_AGENT_DIR or $HOME/.pi/agent). Set SWE_FORGE_ACCEPTANCE_REQUIRED=1 to fail instead of skipping.";
 		if (process.env.SWE_FORGE_ACCEPTANCE_REQUIRED === "1") throw new Error(message);
 		console.log(`SKIP: ${message}`);
 		return;

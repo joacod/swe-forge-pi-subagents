@@ -145,12 +145,15 @@ SWE_FORGE_ACCEPTANCE_MODEL=provider/model \\
 
 The harness creates temporary run state and checkouts, exercises real Pi and
 canonical SWE-Forge capability negotiation for A-D, and removes those paths by
-default. `SWE_FORGE_ACCEPTANCE_MODEL` is an optional explicit override. When
-launched from the current Pi Bash session, the harness otherwise combines
-non-empty `PI_PROVIDER` and `PI_MODEL` as `provider/model`; ordinary
-terminal/CI runs may still need the explicit override. It does not read Pi
-settings files. Without a resolved model, A-D are reported as skipped unless
-`SWE_FORGE_ACCEPTANCE_REQUIRED=1` is set; E and F remain runnable without one.
-E uses the built runtime with malformed child output; F runs the Pi-adapter
-fixture that proves `ISOLATED` protection. Run an individual scenario with
-`--scenario A` through `--scenario F`.
+default. Model resolution checks, in order, `SWE_FORGE_ACCEPTANCE_MODEL`,
+non-empty `PI_PROVIDER` plus `PI_MODEL`, and then `defaultProvider` plus
+`defaultModel` from Pi's `settings.json`. The settings file is read-only
+fallback configuration: CI may set `PI_CODING_AGENT_DIR` to the directory that
+contains it, otherwise `$HOME/.pi/agent` is used. Settings contents and
+credentials are not logged. Model selection does not provide authentication;
+Pi authentication is still required for A-D. Without a resolved model, A-D
+are reported as skipped unless `SWE_FORGE_ACCEPTANCE_REQUIRED=1` is set; use
+that variable when skipped acceptance must fail. E and F remain runnable
+without a model. E uses the built runtime with malformed child output; F runs
+the Pi-adapter fixture that proves `ISOLATED` protection. Run an individual
+scenario with `--scenario A` through `--scenario F`.
