@@ -336,12 +336,16 @@ Tests use temporary fake SWE-Forge installations and injected Pi commands.
 The opt-in acceptance harness uses a real Pi process, the installed SWE-Forge
 support root, and this package when a model is resolved. A-D invoke real model
 calls, and Scenario C writes only to a disposable temporary checkout.
-`SWE_FORGE_ACCEPTANCE_MODEL` is an optional explicit override; otherwise a
-current Pi Bash session's non-empty `PI_PROVIDER` and `PI_MODEL` are combined
-as `provider/model`. Ordinary terminal/CI runs may still need the explicit
-override. Without either source, A-D skip unless
-`SWE_FORGE_ACCEPTANCE_REQUIRED=1`; E and F remain runnable without a model.
-The harness also covers fallback, malformed output, and topology protection.
+Model resolution for A-D checks these sources in order: the explicit
+`SWE_FORGE_ACCEPTANCE_MODEL`, non-empty `PI_PROVIDER` plus `PI_MODEL`, then
+`defaultProvider` plus `defaultModel` from Pi's `settings.json`. The settings
+file is read-only fallback configuration; set `PI_CODING_AGENT_DIR` in CI to
+point to its containing directory, or the resolver uses `$HOME/.pi/agent`.
+Selecting a model does not authenticate Pi, so authentication is still
+required for real-model runs. Without a resolved model, A-D skip; set
+`SWE_FORGE_ACCEPTANCE_REQUIRED=1` when a skipped acceptance run should fail.
+E and F remain runnable without a model. The harness also covers fallback,
+malformed output, and topology protection.
 See [`scripts/acceptance.mjs`](scripts/acceptance.mjs) and
 [`docs/compatibility.md`](docs/compatibility.md) for setup.
 For development-only canonical-root experiments, set `SWE_FORGE_ROOT` to an
