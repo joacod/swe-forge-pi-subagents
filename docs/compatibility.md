@@ -125,8 +125,8 @@ policy and adapter deliberately; do not guess or silently widen the ranges.
 
 ## Real cross-repository acceptance
 
-The release harness is opt-in because A-D require a configured model and may
-write the disposable checkout used by Scenario C:
+The release harness is opt-in because A-D invoke real model calls and Scenario
+C writes to a disposable temporary checkout:
 
 ```bash
 cd /path/to/swe-forge
@@ -145,8 +145,12 @@ SWE_FORGE_ACCEPTANCE_MODEL=provider/model \\
 
 The harness creates temporary run state and checkouts, exercises real Pi and
 canonical SWE-Forge capability negotiation for A-D, and removes those paths by
-default. E uses the built runtime with malformed child output; F runs the
-Pi-adapter fixture that proves `ISOLATED` protection. Run an individual
-scenario with `--scenario A` through `--scenario F`. Without
-`SWE_FORGE_ACCEPTANCE_MODEL`, A-D are reported as skipped unless
-`SWE_FORGE_ACCEPTANCE_REQUIRED=1` is set.
+default. `SWE_FORGE_ACCEPTANCE_MODEL` is an optional explicit override. When
+launched from the current Pi Bash session, the harness otherwise combines
+non-empty `PI_PROVIDER` and `PI_MODEL` as `provider/model`; ordinary
+terminal/CI runs may still need the explicit override. It does not read Pi
+settings files. Without a resolved model, A-D are reported as skipped unless
+`SWE_FORGE_ACCEPTANCE_REQUIRED=1` is set; E and F remain runnable without one.
+E uses the built runtime with malformed child output; F runs the Pi-adapter
+fixture that proves `ISOLATED` protection. Run an individual scenario with
+`--scenario A` through `--scenario F`.

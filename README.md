@@ -334,9 +334,15 @@ npm run acceptance -- --help
 
 Tests use temporary fake SWE-Forge installations and injected Pi commands.
 The opt-in acceptance harness uses a real Pi process, the installed SWE-Forge
-support root, and this package when `SWE_FORGE_ACCEPTANCE_MODEL` is set; it also
-covers fallback, malformed output, and topology protection. See
-[`scripts/acceptance.mjs`](scripts/acceptance.mjs) and
+support root, and this package when a model is resolved. A-D invoke real model
+calls, and Scenario C writes only to a disposable temporary checkout.
+`SWE_FORGE_ACCEPTANCE_MODEL` is an optional explicit override; otherwise a
+current Pi Bash session's non-empty `PI_PROVIDER` and `PI_MODEL` are combined
+as `provider/model`. Ordinary terminal/CI runs may still need the explicit
+override. Without either source, A-D skip unless
+`SWE_FORGE_ACCEPTANCE_REQUIRED=1`; E and F remain runnable without a model.
+The harness also covers fallback, malformed output, and topology protection.
+See [`scripts/acceptance.mjs`](scripts/acceptance.mjs) and
 [`docs/compatibility.md`](docs/compatibility.md) for setup.
 For development-only canonical-root experiments, set `SWE_FORGE_ROOT` to an
 explicit fixture/support root; invalid overrides do not fall back elsewhere.

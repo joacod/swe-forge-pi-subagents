@@ -31,6 +31,7 @@ try {
 		);
 		const testDirectory = join(buildDirectory, "test");
 		const allTestFiles = [
+			join(root, "test", "acceptance-model.test.mjs"),
 			join(testDirectory, "checkout-scheduler.test.js"),
 			join(testDirectory, "discovery.test.js"),
 			join(testDirectory, "extension.test.js"),
