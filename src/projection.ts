@@ -418,6 +418,14 @@ interface ParsedField {
 	readonly value?: string;
 }
 
+const WORKER_BRIEFING_PATH = ["worker_briefing"] as const;
+const WORKER_BRIEFING_SCHEMA_PATH = ["worker_briefing", "schema"] as const;
+const WORKER_BRIEFING_TASK_ID_PATH = ["worker_briefing", "task_id"] as const;
+const WORKER_BRIEFING_PERMISSIONS_PATH = ["worker_briefing", "permissions"] as const;
+const WORKER_BRIEFING_WRITE_ACCESS_PATH = ["worker_briefing", "permissions", "write_access"] as const;
+const WORKER_BRIEFING_TOPOLOGY_PATH = ["worker_briefing", "permissions", "topology"] as const;
+const WORKER_BRIEFING_WRITE_ISOLATION_PATH = ["worker_briefing", "permissions", "write_isolation"] as const;
+
 function normalizeParsedFieldValue(rawValue: string | undefined): ParsedField {
 	let value = rawValue?.trim() ?? "";
 	if (
@@ -441,6 +449,83 @@ function parsedField(markdown: string, fieldName: string): ParsedField {
 	return parsedFields(markdown, fieldName)[0] ?? { present: false };
 }
 
+interface ParsedMappingLine {
+	readonly indent: number;
+	readonly key?: string;
+	readonly value: string;
+	readonly sequence: boolean;
+}
+
+interface PathStackEntry {
+	readonly indent: number;
+	readonly segment: string;
+}
+
+function indentationWidth(value: string): number {
+	return value.replace(/\t/gu, "    ").length;
+}
+
+/** Parse only the simple block mappings used by worker_briefing/v1. */
+function parsedMappingLine(line: string): ParsedMappingLine | undefined {
+	const sequenceOnly = /^(?<indent>[ \t]*)-\s*(?:#.*)?$/u.exec(line);
+	if (sequenceOnly?.groups?.indent !== undefined) {
+		return { indent: indentationWidth(sequenceOnly.groups.indent), value: "", sequence: true };
+	}
+
+	const match = /^(?<indent>[ \t]*)(?<sequence>-\s+)?(?<key>[A-Za-z_][A-Za-z0-9_-]*)\s*:\s*(?<value>.*?)\s*$/u.exec(line);
+	if (
+		match?.groups === undefined ||
+		match.groups.indent === undefined ||
+		match.groups.key === undefined ||
+		match.groups.value === undefined
+	) {
+		return undefined;
+	}
+	return {
+		indent: indentationWidth(match.groups.indent),
+		key: match.groups.key,
+		value: match.groups.value,
+		sequence: match.groups.sequence !== undefined,
+	};
+}
+
+function samePath(left: readonly string[], right: readonly string[]): boolean {
+	return left.length === right.length && left.every((segment, index) => segment === right[index]);
+}
+
+/** Read exact scalar paths without attempting to parse general YAML. */
+function parsedPathFields(markdown: string, expectedPath: readonly string[]): ParsedField[] {
+	const fields: ParsedField[] = [];
+	const stack: PathStackEntry[] = [];
+
+	for (const line of markdown.split(/\r?\n/u)) {
+		const parsed = parsedMappingLine(line);
+		if (!parsed) continue;
+
+		while (stack.length > 0 && stack[stack.length - 1].indent >= parsed.indent) stack.pop();
+		if (parsed.key === undefined) {
+			stack.push({ indent: parsed.indent, segment: "[]" });
+			continue;
+		}
+		if (parsed.sequence) stack.push({ indent: parsed.indent, segment: "[]" });
+
+		const path = [...stack.map((entry) => entry.segment), parsed.key];
+		if (samePath(path, expectedPath)) fields.push(normalizeParsedFieldValue(parsed.value));
+		if (parsed.value.trim().length === 0) {
+			stack.push({
+				indent: parsed.indent + 0.5,
+				segment: parsed.key,
+			});
+		}
+	}
+
+	return fields;
+}
+
+function parsedFieldAtPath(markdown: string, path: readonly string[]): ParsedField {
+	return parsedPathFields(markdown, path)[0] ?? { present: false };
+}
+
 function distinctConcreteValues(fields: readonly ParsedField[]): string[] {
 	return [...new Set(fields.flatMap((field) => (field.value === undefined ? [] : [field.value])))];
 }
@@ -448,7 +533,7 @@ function distinctConcreteValues(fields: readonly ParsedField[]): string[] {
 /** Identify the assigned task without translating the worker briefing. */
 export function extractWorkerBriefingTaskIdentifier(markdown: string): string | undefined {
 	if (typeof markdown !== "string") return undefined;
-	return parsedField(markdown, "task_id").value;
+	return parsedFieldAtPath(markdown, WORKER_BRIEFING_TASK_ID_PATH).value;
 }
 
 function normalizeWriteAccess(value: string): CanonicalWriteAccess | undefined {
@@ -460,8 +545,12 @@ function normalizeWriteAccess(value: string): CanonicalWriteAccess | undefined {
 	return undefined;
 }
 
-function requiredWorkerBriefingMarker(markdown: string, fieldName: string): void {
-	if (!parsedField(markdown, fieldName).present) {
+function requiredWorkerBriefingMarker(
+	markdown: string,
+	path: readonly string[],
+	fieldName = path.join("."),
+): void {
+	if (!parsedFieldAtPath(markdown, path).present) {
 		throw new SWEForgeRuntimeError(
 			"MISSING_WORKER_BRIEFING_FIELD",
 			`The worker briefing is missing required field ${fieldName}.`,
@@ -470,8 +559,12 @@ function requiredWorkerBriefingMarker(markdown: string, fieldName: string): void
 	}
 }
 
-function requiredWorkerBriefingValue(markdown: string, fieldName: string): string {
-	const fields = parsedFields(markdown, fieldName);
+function requiredWorkerBriefingValue(
+	markdown: string,
+	path: readonly string[],
+	fieldName = path[path.length - 1] ?? "field",
+): string {
+	const fields = parsedPathFields(markdown, path);
 	const values = distinctConcreteValues(fields);
 	if (values.length > 1) {
 		throw new SWEForgeRuntimeError(
@@ -492,7 +585,7 @@ function requiredWorkerBriefingValue(markdown: string, fieldName: string): strin
 }
 
 function extractWorkerBriefingWriteAccess(markdown: string): CanonicalWriteAccess {
-	const values = distinctConcreteValues(parsedFields(markdown, "write_access"));
+	const values = distinctConcreteValues(parsedPathFields(markdown, WORKER_BRIEFING_WRITE_ACCESS_PATH));
 	if (values.length > 1) {
 		throw new SWEForgeRuntimeError(
 			"ACCESS_CONFLICT",
@@ -536,8 +629,8 @@ export function validateWorkerBriefing(
 	options: { readonly expectedWriteAccess?: CanonicalWriteAccess } = {},
 ): WorkerBriefingValidation {
 	ensureWorkerBriefingString(workerBriefing);
-	requiredWorkerBriefingMarker(workerBriefing, "worker_briefing");
-	const schema = requiredWorkerBriefingValue(workerBriefing, "schema");
+	requiredWorkerBriefingMarker(workerBriefing, WORKER_BRIEFING_PATH, "worker_briefing");
+	const schema = requiredWorkerBriefingValue(workerBriefing, WORKER_BRIEFING_SCHEMA_PATH, "schema");
 	if (schema !== "worker-brief/v1") {
 		throw new SWEForgeRuntimeError(
 			"UNSUPPORTED_WORKER_BRIEFING_SCHEMA",
@@ -545,9 +638,9 @@ export function validateWorkerBriefing(
 			{ details: { schema } },
 		);
 	}
-	requiredWorkerBriefingMarker(workerBriefing, "task_id");
-	requiredWorkerBriefingMarker(workerBriefing, "permissions");
-	const taskIds = distinctConcreteValues(parsedFields(workerBriefing, "task_id"));
+	requiredWorkerBriefingMarker(workerBriefing, WORKER_BRIEFING_TASK_ID_PATH, "task_id");
+	requiredWorkerBriefingMarker(workerBriefing, WORKER_BRIEFING_PERMISSIONS_PATH, "permissions");
+	const taskIds = distinctConcreteValues(parsedPathFields(workerBriefing, WORKER_BRIEFING_TASK_ID_PATH));
 	if (taskIds.length > 1) {
 		throw new SWEForgeRuntimeError(
 			"CONFLICTING_TASK_ID",
@@ -572,7 +665,7 @@ export function validateWorkerBriefing(
 		);
 	}
 
-	const topology = requiredWorkerBriefingValue(workerBriefing, "topology").toUpperCase();
+	const topology = requiredWorkerBriefingValue(workerBriefing, WORKER_BRIEFING_TOPOLOGY_PATH, "topology").toUpperCase();
 	if (topology !== "SUBAGENTS") {
 		throw new SWEForgeRuntimeError(
 			"INVALID_WORKER_BRIEFING",
@@ -580,7 +673,11 @@ export function validateWorkerBriefing(
 			{ details: { topology } },
 		);
 	}
-	const writeIsolation = requiredWorkerBriefingValue(workerBriefing, "write_isolation").toUpperCase();
+	const writeIsolation = requiredWorkerBriefingValue(
+		workerBriefing,
+		WORKER_BRIEFING_WRITE_ISOLATION_PATH,
+		"write_isolation",
+	).toUpperCase();
 	if (writeIsolation !== "SHARED") {
 		throw new SWEForgeRuntimeError(
 			"INVALID_WORKER_BRIEFING",

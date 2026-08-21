@@ -35,6 +35,10 @@ const WORKER_BRIEFING = `worker_briefing:
     write_isolation: SHARED
 `;
 const WRITABLE_WORKER_BRIEFING = WORKER_BRIEFING.replace("write_access: read-only", "write_access: read-write");
+const DEPENDENCY_WORKER_BRIEFING = WORKER_BRIEFING.replace(
+	"  objective: bounded fixture task\n",
+	"  objective: bounded fixture task\n  dependencies:\n    completed:\n      - task_id: discovery-A\n        dependency_digest:\n          relevant_facts:\n            - interface X is canonical\n",
+);
 const RESULT_OUTPUT = "STATUS: DONE\nTASK_ID: task-123\nSUMMARY: fixture complete\nVALIDATION: fixture passed\n";
 const REVIEW_OUTPUT = "STATUS: PASS\nTASK_ID: task-123\nREVIEW_FOCUS: fixture review\nFINDINGS: []\n";
 
@@ -257,6 +261,19 @@ test("runs a read-only role with only the READ_ONLY profile and removes prompt m
 	assert.match(record.prompt ?? "", /EXPECTED CANONICAL RESULT CONTRACT/u);
 	assert.ok(record.promptPath);
 	await assert.rejects(access(record.promptPath));
+});
+
+test("uses the assigned task ID through runtime when dependencies have task IDs", async () => {
+	const root = await createCanonicalRoot();
+	const project = await createProject();
+	const recordPathValue = await recordPath();
+	const result = await executeSWEForgeTask({
+		...childOptions(root, project, recordPathValue, "success", "READ_ONLY"),
+		workerBriefing: DEPENDENCY_WORKER_BRIEFING,
+	});
+
+	assert.equal(result.runtime.taskId, "task-123");
+	assert.equal(result.validation?.taskId, "task-123");
 });
 
 test("caches one successful Pi compatibility probe for repeated invocation configuration", async () => {

@@ -206,9 +206,45 @@ test("validates worker_briefing/v1 fields, profile access, and task identity", (
 	);
 });
 
+test("uses the assigned worker task path instead of completed dependency task IDs", () => {
+	const briefing = `worker_briefing:
+  schema: worker-brief/v1
+  task_id: implementation-B
+  worker:
+    role: reader
+    mode: delegated_worker
+    depth: 1
+    recursive_delegation: false
+  objective: inspect implementation dependencies
+  dependencies:
+    completed:
+      - task_id: discovery-A
+        dependency_digest:
+          relevant_facts:
+            - interface X is canonical
+  permissions:
+    write_access: read-only
+    topology: SUBAGENTS
+    write_isolation: SHARED
+`;
+
+	assert.equal(extractWorkerBriefingTaskIdentifier(briefing), "implementation-B");
+	assert.deepEqual(validateWorkerBriefing(briefing, { expectedWriteAccess: "READ_ONLY" }), {
+		valid: true,
+		taskId: "implementation-B",
+		writeAccess: "READ_ONLY",
+		topology: "SUBAGENTS",
+		writeIsolation: "SHARED",
+	});
+});
+
 test("rejects conflicting worker briefing metadata instead of choosing the first declaration", () => {
+	const conflictingWriteAccess = WORKER_BRIEFING.replace(
+		"    write_isolation: SHARED\n",
+		"    write_isolation: SHARED\n    write_access: read-write\n",
+	);
 	assert.throws(
-		() => validateWorkerBriefing(`${WORKER_BRIEFING}  write_access: read-write\n`),
+		() => validateWorkerBriefing(conflictingWriteAccess),
 		(error: unknown) => error instanceof SWEForgeRuntimeError && error.code === "ACCESS_CONFLICT",
 	);
 	assert.throws(
