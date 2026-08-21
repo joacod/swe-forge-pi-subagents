@@ -172,7 +172,6 @@ export interface SWEForgeTaskResult {
 
 interface ChildState {
 	assistantMessage?: JsonObject;
-	lastAssistantMessage?: JsonObject;
 	agentStartedAt?: number;
 	agentSettledAt?: number;
 	turnCount: number;
@@ -331,16 +330,23 @@ function resolveTools(options: { readonly profile?: ChildToolProfile; readonly t
 	);
 }
 
-function textFromMessage(message: JsonObject): string {
+function boundedTextFromMessage(
+	message: JsonObject,
+	maxBytes: number,
+): { readonly value: string; readonly truncated: boolean } {
 	const content = message.content;
-	if (typeof content === "string") return content;
-	if (!Array.isArray(content)) return "";
+	if (typeof content === "string") return boundedUtf8(content, maxBytes);
+	if (!Array.isArray(content)) return { value: "", truncated: false };
 
-	return content
-		.filter(isRecord)
-		.filter((part) => part.type === "text" && typeof part.text === "string")
-		.map((part) => part.text as string)
-		.join("");
+	const textParts: string[] = [];
+	let bytes = 0;
+	for (const part of content) {
+		if (!isRecord(part) || part.type !== "text" || typeof part.text !== "string") continue;
+		bytes += Buffer.byteLength(part.text, "utf8");
+		if (bytes > maxBytes) return { value: "", truncated: true };
+		textParts.push(part.text);
+	}
+	return { value: textParts.join(""), truncated: false };
 }
 
 function assistantMessage(value: unknown): JsonObject | undefined {
@@ -357,7 +363,6 @@ function lastAssistantMessage(values: readonly unknown[]): JsonObject | undefine
 
 function applyFinalAssistant(message: JsonObject, state: ChildState): void {
 	state.assistantMessage = message;
-	state.lastAssistantMessage = message;
 	state.usage = usageDiagnostics(message.usage);
 	state.stopReason = asNonEmptyString(message.stopReason);
 	state.errorMessage = asNonEmptyString(message.errorMessage);
@@ -373,11 +378,9 @@ function processSessionEvent(eventValue: unknown, state: ChildState): void {
 		case "turn_start":
 			state.turnCount += 1;
 			return;
-		case "message_end": {
-			const message = assistantMessage(eventValue.message);
-			if (message) state.lastAssistantMessage = message;
+		case "message_end":
+			// Streaming and intermediate message events are intentionally ignored.
 			return;
-		}
 		case "agent_end": {
 			const messages = Array.isArray(eventValue.messages) ? eventValue.messages : [];
 			const finalMessage = lastAssistantMessage(messages);
@@ -670,14 +673,13 @@ async function runPiChildAgentUnlocked(
 		await session.waitForIdle();
 		state.agentSettledAt ??= performance.now();
 		state.assistantMessage ??= lastAssistantMessage(session.messages);
-		state.lastAssistantMessage ??= state.assistantMessage;
 		if (state.assistantMessage) applyFinalAssistant(state.assistantMessage, state);
 
 		const finalAssistant = state.assistantMessage;
 		const stopReason = state.stopReason;
 		const abortedByModel = stopReason === "aborted";
 		const failedByModel = stopReason === "error" || stopReason === "length";
-		const bounded = finalAssistant ? boundedUtf8(textFromMessage(finalAssistant), MAX_WORKER_RESULT_BYTES) : undefined;
+		const bounded = finalAssistant ? boundedTextFromMessage(finalAssistant, MAX_WORKER_RESULT_BYTES) : undefined;
 		if (bounded?.truncated) state.outputTruncated = true;
 
 		const status: ChildAgentStatus = wasAborted || options.signal?.aborted || abortedByModel
@@ -688,7 +690,6 @@ async function runPiChildAgentUnlocked(
 		finalResult = {
 			status,
 			text: status === "completed" && bounded ? bounded.value : "",
-			assistantMessage: finalAssistant,
 			stopReason,
 			errorMessage:
 				status === "aborted"

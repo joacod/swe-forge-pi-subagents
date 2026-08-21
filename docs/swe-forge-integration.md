@@ -42,11 +42,11 @@ canonical roles/contracts, or `ISOLATED`/worktree execution.
 - live discovery of the already-installed canonical SWE-Forge support root;
 - projection of one selected canonical role and output contract into one child
   prompt;
-- one bounded child Pi process with a closed `READ_ONLY` or `WRITABLE` tool
-  profile;
-- the child conversation/process boundary, bounded transport diagnostics,
-  cancellation cleanup, and the process-local shared-reader/exclusive-writer
-  checkout lock; and
+- one bounded in-process Pi `AgentSession` with a closed `READ_ONLY` or
+  `WRITABLE` tool profile;
+- the child session boundary, bounded lifecycle diagnostics, cancellation
+  cleanup, and the process-local shared-reader/exclusive-writer checkout lock;
+  and
 - recognizable task/output boundary validation.
 
 It does not own workflow state, task queues, planner data, provider/model
@@ -63,8 +63,9 @@ machine-readable result.
 Relevant v1 capability facts include:
 
 - `protocolVersion: 1` (independent from `packageVersion`);
-- `pi.compatibilityRange` and pre-execution version verification;
-- `isolation.contextIsolation: true`, `processIsolation: true`,
+- `pi.compatibilityRange`, `runtime: in_process_agent_session`, and public SDK
+  compatibility verification;
+- `isolation.contextIsolation: true`, `processIsolation: false`,
   `filesystemIsolation: false`, and `osSandbox: false`;
 - `sweForge.installed`, `sweForge.version`, and the discovered `roles`;
 - `availableProfiles` and `profileTools` for `READ_ONLY` and `WRITABLE`;
@@ -177,7 +178,7 @@ install SWE-Forge. The main SWE-Forge installer must preserve that separation.
 If the package is removed or Pi disables it, the main adapter must still expose
 its normal `/swe-forge` behavior and its existing sequential fallback. An
 unsupported Pi/SWE-Forge version, missing canonical root, missing role, or
-child-process failure must degrade to the same fallback or canonical blocked
+child-session failure must degrade to the same fallback or canonical blocked
 status that the existing adapter already uses; it must not trigger an implicit
 package installation or a topology rewrite.
 
@@ -186,7 +187,7 @@ package installation or a topology rewrite.
 The extension's v1 compatibility lines are Pi `>=0.84.1 <0.85.0` and
 SWE-Forge `0.1.x`. The extension reads those installed sources live rather than
 bundling role or contract definitions. If the main repository changes a public
-role/contract shape or the Pi child protocol, it must coordinate a deliberate
+role/contract shape or the Pi child SDK boundary, it must coordinate a deliberate
 compatibility update; this document is not permission to silently widen either
 range.
 

@@ -3,7 +3,8 @@
 Optional Pi package that gives SWE-Forge's `SUBAGENTS` topology one bounded
 child-agent execution primitive. It discovers the installed canonical
 SWE-Forge support root, loads a selected role and output contract without
-copying them, and runs one fresh Pi JSON subprocess in the requested checkout.
+copying them, and runs one fresh in-process Pi `AgentSession` in the requested
+checkout.
 The public Pi tool is `swe_forge_subagent`.
 
 ## What this package is
@@ -41,14 +42,13 @@ repository. The adapter integration boundary is documented in
 ## Relationship to Pi
 
 Pi loads this package as an extension from its package settings. The extension
-registers one tool, `swe_forge_subagent`, and uses Pi's documented one-shot JSON
-CLI to create a separate child process/context. Pi supplies the host runtime,
+registers one tool, `swe_forge_subagent`, and uses Pi's public SDK to create a
+fresh in-memory `AgentSession` for each task. Pi supplies the host runtime,
 model/auth configuration, built-in tools, package loading, and process
-permissions; this package supplies only the bounded child boundary and
-canonical-source projection. It is built using Pi's documented extension and
-CLI primitives and follows the subprocess-based context-isolation approach
-used by Pi's official subagent example; it does not depend on a private
-`Subagent` SDK.
+permissions; this package supplies only the bounded child-session boundary and
+canonical-source projection. The runtime uses explicit SDK model, thinking,
+tool, session, settings, and resource-loader options; it does not depend on a
+private `Subagent` API.
 
 Installing the package does **not** activate SWE-Forge. SWE-Forge remains
 explicitly invoked, for example:
@@ -67,9 +67,8 @@ The canonical public task API is `executeSWEForgeTask` with task fields
 `role` and `profile`; its result has `output`, `runtime`, and `validation`.
 Capability discovery is `getSWEForgeCapabilities`, whose `packageVersion` is
 implementation metadata and whose `protocolVersion` is the independent wire
-contract version. Low-level Pi transport, argument-building, and checkout-lock
-helpers are implementation details and are not re-exported as a generic
-child-agent API.
+contract version. Low-level session-factory and checkout-lock helpers are implementation details
+and are not re-exported as a generic child-agent API.
 
 ## Installation
 
@@ -155,12 +154,11 @@ The tool exposes exactly two actions:
   `profile` (`READ_ONLY` or `WRITABLE`).
 
 A run loads the selected role and expected output contract live, composes one
-explicit prompt, starts one fresh Pi JSON subprocess, returns canonical output
-separately from bounded runtime diagnostics, and validates the recognizable
-canonical result shape. Successful Pi compatibility verification is cached for
-the host process per invocation configuration; concurrent matching checks share
-one in-flight probe. The caller remains responsible for task decomposition,
-workflow interpretation, evidence, review, integration, and acceptance.
+explicit system prompt, creates one fresh in-memory `AgentSession`, returns
+canonical output separately from bounded runtime diagnostics, and validates the
+recognizable canonical result shape. The caller remains responsible for task
+decomposition, workflow interpretation, evidence, review, integration, and
+acceptance.
 
 The capability surface intentionally has no arrays of tasks, chains, queues,
 retry policy, persistence, resume/steer API, worktree API, delivery API, or
@@ -169,8 +167,8 @@ nested delegation.
 ## Runtime diagnostics and result bound
 
 The tool's non-model-visible `details.runtime.diagnostics` may include
-`compatibilityCheckDurationMs`, `queueWaitDurationMs`,
-`childStartupDurationMs`, `agentExecutionDurationMs`,
+`queueWaitDurationMs`, `sessionInitializationDurationMs`,
+`agentExecutionDurationMs`,
 `totalRuntimeDurationMs`, `turns`, and final Pi usage (`inputTokens`,
 `outputTokens`, `cacheReadTokens`, `cacheWriteTokens`, `totalTokens`, and
 `cost`). Timing and usage fields are optional and omitted when unavailable;
@@ -197,14 +195,14 @@ other processes modifying the filesystem.
 
 ## Context isolation vs filesystem isolation
 
-The child has a separate Pi process, `--no-session` conversation, prompt
-material, and model context. It does not receive the parent's conversation or
-extension/skill/template/theme/context-file loading. Its process working
-directory is still the caller's normalized checkout. Filesystem state is
-therefore shared by design.
+The child has a fresh in-memory Pi session and model context. It does not
+receive the parent's messages, session history, extensions, skills, prompt
+templates, themes, or context-file discovery. Its working directory is still
+the caller's normalized checkout, and it shares the host process and
+filesystem by design.
 
 The advertised semantics are explicit: `contextIsolation: true`,
-`processIsolation: true`, `filesystemIsolation: false`, and `osSandbox: false`.
+`processIsolation: false`, `filesystemIsolation: false`, and `osSandbox: false`.
 Workers run with the user's OS permissions (`workerPermissions:
 user_os_permissions`). This package does not provide worktrees, containers,
 VMs, or an OS/security sandbox. SWE-Forge `ISOLATED` execution and worktree
@@ -238,18 +236,19 @@ canonical `ISOLATED` workflow.
 - **Filesystem boundary:** the child uses the active checkout and inherits the
   user's OS permissions. This is not a sandbox; use a real OS/container/VM
   boundary for untrusted projects.
-- **Credentials:** the child inherits the normal process environment and Pi
-  configuration used for authentication. Runtime-only in-memory provider
-  registrations or keys are not promised across the subprocess boundary.
-- **Temporary material:** the prompt file is created with restrictive `0600`
-  permissions and removed after the child exits. Secrets are not copied into
-  the prompt or diagnostics.
+- **Credentials:** each session creates a fresh `ModelRuntime` from the normal
+  Pi auth/model configuration. Runtime-only provider registrations or keys from
+  the parent extension context are not silently inherited; unavailable models
+  fail clearly.
+- **Resources:** each session uses a minimal resource loader containing only
+  the canonical projected system prompt. Extensions, skills, prompt templates,
+  themes, context files, and session persistence are absent.
 - **Output:** child output is untrusted model data. Canonical shape checks do
   not turn it into Git, test, or delivery evidence; SWE-Forge must validate
   evidence independently.
-- **Cancellation and cleanup:** cancellation terminates the child on a
-  best-effort platform-appropriate process boundary and reports `aborted`; it
-  is never upgraded to success.
+- **Cancellation and cleanup:** cancellation calls `AgentSession.abort()`,
+  waits for idle, disposes the session, and reports `aborted`; it is never
+  upgraded to success.
 
 ## Canonical role loading
 
@@ -270,17 +269,17 @@ are bundled in this package.
 | Component | v1 support |
 | --- | --- |
 | Node.js | `>=22.19.0` |
-| Pi CLI/package | `>=0.84.1 <0.85.0` (development/tested release: `0.84.2`) |
+| Pi SDK/package | `>=0.84.1 <0.85.0` (development/tested release: `0.84.2`) |
 | SWE-Forge | `0.1.x` (minimum tested `0.1.0-alpha.1`) |
-| Runtime dependencies | Pi core packages and `typebox` as `*` peers supplied by Pi; no production community subagent dependency |
+| Runtime dependencies | `@earendil-works/pi-coding-agent` `>=0.84.1 <0.85.0` and `typebox` as peers supplied by Pi; no production community subagent dependency |
 | Protocol | `protocolVersion: 1`; `packageVersion` is not used as the protocol version |
 | Supported profiles | `READ_ONLY`, `WRITABLE` |
 | Exercised platform | macOS with Node 24.15.0; Linux and Windows are portability targets, not fully exercised release claims |
 
-The child probes each configured Pi invocation and fails closed when it
-cannot verify the supported line. The successful result is reused only within
-the host process and matching invocation configuration. Fixture commands use the
-same version-probe seam and do not widen the runtime compatibility claim. See
+The runtime is guarded by the public `createAgentSession`/`ModelRuntime` SDK
+surface and the declared peer range; it does not spawn or probe a Pi CLI.
+Unsupported SDK versions fail at package/API loading or session creation rather
+than silently falling back to another runtime. See
 [`docs/compatibility.md`](docs/compatibility.md) for trust and boundary details.
 
 ## Troubleshooting
@@ -303,7 +302,7 @@ public boundary changes; it does not silently widen compatibility.
 **The child cannot authenticate or run.** Pass/retain an explicit
 `provider/model` selected by the caller, confirm Pi can authenticate in a
 normal session, and remember that in-memory extension-only provider/auth state
-does not automatically cross the child process boundary.
+is not inherited by the fresh child `ModelRuntime`.
 
 **A task is rejected for access or output.** Check that `write_access` agrees
 with `READ_ONLY`/`WRITABLE`, that the role name is canonical, and that the
@@ -351,10 +350,11 @@ npm run build
 npm run acceptance -- --help
 ```
 
-Tests use temporary fake SWE-Forge installations and injected Pi commands.
-The opt-in acceptance harness uses a real Pi process, the installed SWE-Forge
-support root, and this package when a model is resolved. A-D invoke real model
-calls, and Scenario C writes only to a disposable temporary checkout.
+Tests use temporary fake SWE-Forge installations and injected AgentSession
+factories. The opt-in acceptance harness uses a real Pi host session, the
+installed SWE-Forge support root, and this package when a model is resolved.
+A-D invoke real model calls, and Scenario C writes only to a disposable
+temporary checkout.
 Model resolution for A-D checks these sources in order: the explicit
 `SWE_FORGE_ACCEPTANCE_MODEL`, non-empty `PI_PROVIDER` plus `PI_MODEL`, then
 `defaultProvider` plus `defaultModel` from Pi's `settings.json`. The settings
@@ -374,9 +374,9 @@ The package's production behavior always reads the canonical user-level root.
 The scope review for v1 found no workflow engine, planner/DAG, provider
 selector, worktree manager, delivery/PR implementation, background worker
 system, bundled role registry, task database, or recursive delegation in the
-runtime. The checkout lock, canonical projection, and one-child subprocess
-are the only coordination/runtime boundaries retained because they directly
-implement the documented capability.
+runtime. The checkout lock, canonical projection, and one fresh in-process
+AgentSession are the only coordination/runtime boundaries retained because
+they directly implement the documented capability.
 
 Further technical detail:
 

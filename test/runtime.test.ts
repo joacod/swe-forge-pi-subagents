@@ -350,6 +350,7 @@ test("fails closed when final output exceeds the result bound", async () => {
 	assert.equal(result.output, "");
 	assert.equal(result.runtime.status, "failed");
 	assert.equal(result.runtime.outputTruncated, true);
+	assert.equal(result.runtime.assistantMessage, undefined);
 	assert.match(result.runtime.errorMessage ?? "", /exceeded the 65536-byte limit/u);
 	assert.equal(result.validation, undefined);
 });
@@ -454,4 +455,3 @@ test("rejects a malformed canonical task before creating a session", async () =>
 	);
 	assert.equal(records.length, 0);
 });
-

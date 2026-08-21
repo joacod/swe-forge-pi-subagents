@@ -90,23 +90,24 @@ async function writeRunState(directory, id, topology) {
 		statePath,
 		`workflow: swe-forge
 workflow_version: 1
-schema_version: 2
+schema_version: 3
 run_id: acceptance-${id}
 status: running
 requested_mode: ${topology}
-preferred_mode: ${topology}
-execution_mode: ${topology}
 requested_provider: AUTO
 execution_provider: NONE
 delegation_backend: NATIVE
 write_isolation: SHARED
+delivery_mode: GUIDED
 invocation_checkout:
   path: ${checkout}
 delivery_checkout:
   path: ${checkout}
 routing:
-  current: ${topology}
+  initial: ${topology}
   preferred: ${topology}
+  selected: ${topology}
+  current: ${topology}
   context_value:
     projected_pressure: low
 continuation:
@@ -245,7 +246,7 @@ OBJECTIVE: Read README.md and report its first heading. Do not modify any file.`
 	assert(runCall.profile === "READ_ONLY", `Scenario B used profile ${runCall.profile}`);
 	const result = resultForAction(run, "run");
 	assert(result?.details?.runtime?.status === "completed", `Scenario B child result was not completed: ${JSON.stringify({ result, toolResults: run.toolResults })}`);
-	assert(/^0\.84\./u.test(result.details.runtime.piVersion ?? ""), `Scenario B did not verify a real supported Pi child: ${result.details.runtime.piVersion ?? "missing"}`);
+	assert(result.details.runtime.diagnostics?.sessionInitializationDurationMs >= 0, "Scenario B did not report AgentSession initialization diagnostics");
 	assert(JSON.stringify(result.details.runtime.tools) === JSON.stringify(["read", "grep", "find", "ls"]), "Scenario B exposed unexpected tools");
 	assert(!runCall.taskContract.includes("write_access: read-write"), "Scenario B requested writable access");
 	console.log("PASS B: real READ_ONLY child completed with isolated context and read-only tools");
@@ -270,7 +271,7 @@ OBJECTIVE: Create exactly one file at ${marker} containing exactly ACCEPTANCE_WR
 	assert(runCalls[0].profile === "WRITABLE", `Scenario C used profile ${runCalls[0].profile}`);
 	const result = run.toolResults.find((item) => item?.details?.runtime?.profile === "WRITABLE");
 	assert(result?.details?.runtime?.status === "completed", `Scenario C writable child result was not completed: ${JSON.stringify({ result, toolResults: run.toolResults })}`);
-	assert(/^0\.84\./u.test(result.details.runtime.piVersion ?? ""), `Scenario C did not verify a real supported Pi child: ${result.details.runtime.piVersion ?? "missing"}`);
+	assert(result.details.runtime.diagnostics?.sessionInitializationDurationMs >= 0, "Scenario C did not report AgentSession initialization diagnostics");
 	assert(await readFile(marker, "utf8") === "ACCEPTANCE_WRITABLE", "Scenario C marker was not written exactly");
 	console.log("PASS C: real WRITABLE delegation ran once and returned a canonical result");
 }
@@ -292,12 +293,46 @@ async function scenarioE() {
 	const runtime = await import(pathToFileURL(join(packageRoot, "dist", "runtime.js")).href);
 	const directory = await mkdtemp(join(tmpdir(), "swe-forge-acceptance-malformed-"));
 	temporaryPaths.push(directory);
-	const child = join(directory, "malformed-child.mjs");
-	await writeFile(
-		child,
-		`if (process.argv.includes("--version")) { process.stdout.write("0.84.2\\n"); process.exit(0); }\nconst message = { role: "assistant", content: [{ type: "text", text: "STATUS: DONE\\nTASK_ID: acceptance-malformed\\nSUMMARY: truncated" }], stopReason: "stop" };\nprocess.stdout.write(JSON.stringify({ type: "message_end", message }) + "\\n" + JSON.stringify({ type: "agent_end", messages: [message] }) + "\\n");\n`,
-		"utf8",
-	);
+	const listeners = new Set();
+	const messages = [];
+	const message = {
+		role: "assistant",
+		content: [{ type: "text", text: "STATUS: DONE\nTASK_ID: acceptance-malformed\nSUMMARY: truncated" }],
+		stopReason: "stop",
+	};
+	const sessionFactory = async () => {
+		let streaming = false;
+		const emit = (event) => {
+			for (const listener of listeners) listener(event);
+		};
+		return {
+			get messages() {
+				return messages;
+			},
+			get isStreaming() {
+				return streaming;
+			},
+			subscribe(listener) {
+				listeners.add(listener);
+				return () => listeners.delete(listener);
+			},
+			async prompt() {
+				streaming = true;
+				messages.push(message);
+				emit({ type: "agent_start" });
+				emit({ type: "turn_start" });
+				emit({ type: "message_end", message });
+				emit({ type: "agent_end", messages: [message] });
+				streaming = false;
+				emit({ type: "agent_settled" });
+			},
+			async abort() {
+				streaming = false;
+			},
+			async waitForIdle() {},
+			dispose() {},
+		};
+	};
 	await assertRejectsCode(
 		runtime.executeSWEForgeTask({
 			role: await canonicalRole(["researcher", "reader", "reviewer"], sweForgeRepo),
@@ -306,13 +341,12 @@ async function scenarioE() {
 			profile: "READ_ONLY",
 			cwd: directory,
 			model: "fixture/model",
-			piCommand: process.execPath,
-			piCommandArgs: [child],
+			sessionFactory,
 			discovery: { env: { SWE_FORGE_ROOT: sweForgeRepo } },
 		}),
 		"MISSING_OUTPUT_STRUCTURE",
 	);
-	console.log("PASS E: malformed child output failed closed");
+	console.log("PASS E: malformed AgentSession output failed closed");
 }
 
 async function assertRejectsCode(promise, code) {
