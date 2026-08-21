@@ -173,6 +173,14 @@ test("validates worker_briefing/v1 fields, profile access, and task identity", (
 	});
 	assert.equal(validateWorkerBriefing(WRITABLE_WORKER_BRIEFING, { expectedWriteAccess: "WRITABLE" }).writeAccess, "WRITABLE");
 	assert.throws(
+		() => validateWorkerBriefing(WORKER_BRIEFING.replace("worker_briefing:\n", "")),
+		(error: unknown) => error instanceof SWEForgeRuntimeError && error.code === "MISSING_WORKER_BRIEFING_FIELD",
+	);
+	assert.throws(
+		() => validateWorkerBriefing(WORKER_BRIEFING.replace("  schema: worker-brief/v1\n", "")),
+		(error: unknown) => error instanceof SWEForgeRuntimeError && error.code === "MISSING_WORKER_BRIEFING_FIELD",
+	);
+	assert.throws(
 		() => validateWorkerBriefing("worker_briefing:\n  schema: worker-brief/v1\n", { expectedWriteAccess: "READ_ONLY" }),
 		(error: unknown) => error instanceof SWEForgeRuntimeError && error.code === "MISSING_WORKER_BRIEFING_FIELD",
 	);
