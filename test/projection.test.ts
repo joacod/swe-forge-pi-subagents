@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { realpath, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
+	MAX_WORKER_RESULT_BYTES,
 	SWEForgeRuntimeError,
 	composeRuntimePrompt,
 	discoverCanonicalRoleNames,
@@ -205,6 +206,32 @@ test("blocks malformed output instead of treating it as a successful result", ()
 				error.status === "BLOCKED",
 		);
 	}
+});
+
+test("recognizes the current SWE-Forge result contract shape", () => {
+	const output = "RESULT_PROFILE: READ_ONLY\nSTATUS: DONE\nTASK_ID: task-123\nFINDINGS:\n- current contract\nEVIDENCE:\n- projection.test.ts\n";
+
+	assert.deepEqual(validateCanonicalOutput(output, "result", { taskId: "task-123" }), {
+		valid: true,
+		status: "DONE",
+		contract: "result",
+		taskId: "task-123",
+		structure: "recognizable",
+	});
+});
+
+test("rejects canonical output above the model-visible worker result limit", () => {
+	const prefix = "STATUS: DONE\nTASK_ID: task-123\nSUMMARY: ";
+	const suffix = "\nVALIDATION: fixture passed\n";
+	const output = prefix + "x".repeat(MAX_WORKER_RESULT_BYTES - Buffer.byteLength(prefix + suffix) + 1) + suffix;
+
+	assert.throws(
+		() => validateCanonicalOutput(output, "result"),
+		(error: unknown) =>
+			error instanceof SWEForgeRuntimeError &&
+				error.code === "OUTPUT_TOO_LARGE" &&
+				error.details?.maxBytes === MAX_WORKER_RESULT_BYTES,
+	);
 });
 
 test("rejects statuses outside the canonical output contract", () => {

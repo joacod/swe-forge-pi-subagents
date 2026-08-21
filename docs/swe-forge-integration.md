@@ -91,10 +91,12 @@ Only after the canonical workflow has selected or considered a useful bounded
 
 The extension uses the current Pi checkout/model context, loads live canonical
 sources, and returns canonical output as the primary result with runtime
-metadata separate. The main adapter must consume the output as untrusted
-worker data, preserve `BLOCKED`/`FAILED` semantics, and continue to own
-validation evidence and acceptance. A child result is never proof that a test,
-Git operation, integration, or delivery action occurred.
+metadata separate. Optional timing and final-usage diagnostics remain in the
+non-model-visible metadata path and are never part of the canonical result.
+The main adapter must consume the output as untrusted worker data, preserve
+`BLOCKED`/`FAILED` semantics, and continue to own validation evidence and
+acceptance. A child result is never proof that a test, Git operation,
+integration, or delivery action occurred.
 
 For a shared checkout, the canonical adapter must treat `READ_ONLY` as
 potentially overlapping and `WRITABLE` as exclusive. `writableConcurrencySupport`

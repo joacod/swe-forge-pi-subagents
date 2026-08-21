@@ -157,12 +157,30 @@ The tool exposes exactly two actions:
 A run loads the selected role and expected output contract live, composes one
 explicit prompt, starts one fresh Pi JSON subprocess, returns canonical output
 separately from bounded runtime diagnostics, and validates the recognizable
-canonical result shape. The caller remains responsible for task decomposition,
+canonical result shape. Successful Pi compatibility verification is cached for
+the host process per invocation configuration; concurrent matching checks share
+one in-flight probe. The caller remains responsible for task decomposition,
 workflow interpretation, evidence, review, integration, and acceptance.
 
 The capability surface intentionally has no arrays of tasks, chains, queues,
 retry policy, persistence, resume/steer API, worktree API, delivery API, or
 nested delegation.
+
+## Runtime diagnostics and result bound
+
+The tool's non-model-visible `details.runtime.diagnostics` may include
+`compatibilityCheckDurationMs`, `queueWaitDurationMs`,
+`childStartupDurationMs`, `agentExecutionDurationMs`,
+`totalRuntimeDurationMs`, `turns`, and final Pi usage (`inputTokens`,
+`outputTokens`, `cacheReadTokens`, `cacheWriteTokens`, `totalTokens`, and
+`cost`). Timing and usage fields are optional and omitted when unavailable;
+usage is read from the final assistant message rather than reconstructed from
+streaming deltas. These fields are diagnostics only and never duplicate the
+canonical worker result.
+
+Canonical worker output is limited to **64 KiB**. A larger result fails closed
+with an actionable runtime error; it is not silently truncated into a canonical
+success.
 
 ## READ_ONLY vs WRITABLE semantics
 
@@ -252,16 +270,17 @@ are bundled in this package.
 | Component | v1 support |
 | --- | --- |
 | Node.js | `>=22.19.0` |
-| Pi CLI/package | `>=0.84.1 <0.85.0` |
+| Pi CLI/package | `>=0.84.1 <0.85.0` (development/tested release: `0.84.2`) |
 | SWE-Forge | `0.1.x` (minimum tested `0.1.0-alpha.1`) |
 | Runtime dependencies | Pi core packages and `typebox` as `*` peers supplied by Pi; no production community subagent dependency |
 | Protocol | `protocolVersion: 1`; `packageVersion` is not used as the protocol version |
 | Supported profiles | `READ_ONLY`, `WRITABLE` |
 | Exercised platform | macOS with Node 24.15.0; Linux and Windows are portability targets, not fully exercised release claims |
 
-The child probes a real Pi CLI version and fails closed when it cannot verify
-the supported line. Fixture/injected commands used by tests are an explicit
-test seam and do not widen the runtime compatibility claim. See
+The child probes each configured Pi invocation and fails closed when it
+cannot verify the supported line. The successful result is reused only within
+the host process and matching invocation configuration. Fixture commands use the
+same version-probe seam and do not widen the runtime compatibility claim. See
 [`docs/compatibility.md`](docs/compatibility.md) for trust and boundary details.
 
 ## Troubleshooting
@@ -289,8 +308,8 @@ does not automatically cross the child process boundary.
 **A task is rejected for access or output.** Check that `write_access` agrees
 with `READ_ONLY`/`WRITABLE`, that the role name is canonical, and that the
 child returns the requested canonical `result` or `review` structure with its
-expected task ID. A `BLOCKED`, `FAILED`, malformed, or truncated result is not
-success.
+expected task ID. A `BLOCKED`, `FAILED`, malformed, truncated, or over-64-KiB
+result is not success; return concise structured findings instead.
 
 **Concurrent calls behave as if queued.** That is expected for a writer in the
 same normalized checkout. Only readers overlap; the process-local lock is not

@@ -10,12 +10,13 @@ automation.
 | Component | Tested assumption |
 | --- | --- |
 | Node.js | 24.15.0 in the local validation environment; package floor is 22.19.0 because the supported Pi line has that engine floor |
-| Pi package/API | `@earendil-works/pi-coding-agent` 0.84.1 from the package development install |
-| Pi CLI | 0.84.1 from the package development install; the host's separately installed Pi 0.84.2 was inspected for the same public CLI/event surfaces |
-| Pi compatibility line | `>=0.84.1 <0.85.0`; the package declares Pi core packages as `*` peers, while the runtime probes the real child CLI before a task and fails closed when the version cannot be read or is outside this line |
+| Pi package/API | `@earendil-works/pi-coding-agent` 0.84.2 from the package development install; minimum-version behavior is covered by compatibility fixtures for 0.84.1 |
+| Pi CLI | 0.84.2 from the package development install and the host's installed CLI; the public CLI/event surfaces were checked against the current docs |
+| Pi compatibility line | `>=0.84.1 <0.85.0`; the package declares Pi core packages as `*` peers, while the runtime probes each configured child invocation before use, caches successful matching checks per host process, and fails closed when the version cannot be read or is outside this line |
 | Capability protocol | `protocolVersion: 1`; independent from `packageVersion` |
 | Advertised isolation | context/process isolation true; filesystem isolation and OS sandbox false |
 | Supported profiles | `READ_ONLY`, `WRITABLE` |
+| Worker result bound | 64 KiB maximum model-visible canonical result; oversized results fail closed without returning a truncated canonical value |
 | SWE-Forge fixture | 0.1.0-alpha.1, with the live canonical root shape required by discovery |
 | SWE-Forge compatibility line | `0.1.x`; malformed or outside-line `VERSION` values fail before role/contract projection |
 | Platforms | macOS was exercised. POSIX cancellation uses a detached process group; Windows uses direct termination plus best-effort `taskkill /T /F`. Windows and Linux remain portability targets, not fully exercised release claims. |
@@ -26,6 +27,13 @@ or policy revisions. It accepts only the tested 0.1.x line, validates the
 required contract shape, and reports an explicit compatibility error for an
 unknown or unsupported version. It loads the installed files at runtime and
 does **not** pin or bundle canonical roles/contracts.
+
+Successful Pi compatibility probes are cached in memory for the host process
+and keyed by the configured invocation; in-flight matching calls share the
+probe, while failed checks are evicted and retried. Runtime details may include
+queue-wait, child-startup, agent, and total durations, turn count, and final
+assistant usage fields. These optional diagnostics are small, non-model-visible
+metadata and are never part of canonical worker result text.
 
 ## Canonical installation boundary
 
@@ -72,14 +80,16 @@ and the child inherits the normal environment/configuration needed for model
 authentication. Do not run this adapter on an untrusted project without a
 real OS/container/VM boundary.
 
-JSONL parsing requires authoritative `message_end`/`agent_end` records. Plain
-stdout noise, malformed event lines, oversized event lines, stream errors,
-non-zero exits, missing assistant results, truncated assistant output, and
-conflicting canonical assistant results are reported as failed runtime
-evidence. Stderr is retained only as bounded
-process diagnostics; it is not treated as a worker result. A canonical
-`BLOCKED` or `FAILED` result remains data with that status and is never upgraded
-by the adapter.
+JSONL parsing requires authoritative `message_end`/`agent_end` records.
+Current Pi JSON mode emits delta-only `message_update` records, so the adapter
+ignores streaming usage and reads usage from the final assistant message in
+`message_end`/`agent_end`. Plain stdout noise, malformed event lines, oversized
+event lines, stream errors, non-zero exits, missing assistant results, truncated
+or over-limit assistant output, and conflicting canonical assistant results are
+reported as failed runtime evidence. Stderr is retained only as bounded process
+diagnostics; it is not treated as a worker result. A canonical `BLOCKED` or
+`FAILED` result remains data with that status and is never upgraded by the
+adapter.
 
 The parent signal terminates the child process group on POSIX and waits for
 process closure. Windows uses a direct kill and `taskkill` tree request where
@@ -114,9 +124,12 @@ lint, and format checks use the existing TypeScript/Node toolchain without
 adding an unneeded formatter or linter dependency.
 
 `projection.ts` intentionally validates a minimal duplicated wire shape because
-SWE-Forge does not currently publish a small versioned schema export. This is
-deferred technical debt: validation remains fail-closed until a low-coupling
-canonical schema boundary exists.
+SWE-Forge does not currently publish a small versioned schema export. The result
+projection recognizes the current `RESULT_PROFILE`/`FINDINGS`/`EVIDENCE` shape
+and the older `SUMMARY`/`VALIDATION` fixture shape within the tested 0.1.x line;
+it does not define or bundle either contract. This is deferred technical debt:
+validation remains fail-closed until a low-coupling canonical schema boundary
+exists.
 
 When updating Pi or SWE-Forge, rerun the repository tests, package-install
 smoke test, and a fixture-backed child invocation. If a public flag, event
