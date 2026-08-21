@@ -34,6 +34,8 @@ if (args.includes("--version")) {
   const versionFile = process.env.SWE_FORGE_FIXTURE_VERSION_FILE;
   const version = versionFile ? readFileSync(versionFile, "utf8").trim() : process.env.SWE_FORGE_FIXTURE_VERSION ?? "0.84.2";
   if (probeRecordPath) appendFileSync(probeRecordPath, "probe\n");
+  const probeDelayMs = Number(process.env.SWE_FORGE_FIXTURE_PROBE_DELAY_MS ?? "0");
+  if (probeDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, probeDelayMs));
   process.stdout.write(version + "\n");
   process.exit(0);
 }
@@ -272,6 +274,28 @@ test("coalesces concurrent compatibility probes for read-only workers", async ()
 
 	assert.equal(first.runtime.status, "completed");
 	assert.equal(second.runtime.status, "completed");
+	assert.equal(await readProbeCount(probePath), 1);
+});
+
+test("aborting one waiter does not abort another shared compatibility probe", async () => {
+	const root = await createCanonicalRoot();
+	const project = await createProject();
+	const recordPathValue = await recordPath();
+	const probePath = await recordPath();
+	const options = childOptions(root, project, recordPathValue, "success", "READ_ONLY", "fixture/model", {
+		SWE_FORGE_FIXTURE_PROBE_RECORD: probePath,
+		SWE_FORGE_FIXTURE_PROBE_DELAY_MS: "500",
+	});
+	const controller = new AbortController();
+	const first = executeSWEForgeTask({ ...options, signal: controller.signal });
+	await waitForRecord(probePath);
+	const second = executeSWEForgeTask(options);
+	await new Promise((resolve) => setTimeout(resolve, 100));
+	controller.abort();
+
+	const [firstResult, secondResult] = await Promise.all([first, second]);
+	assert.equal(firstResult.runtime.status, "aborted");
+	assert.equal(secondResult.runtime.status, "completed");
 	assert.equal(await readProbeCount(probePath), 1);
 });
 

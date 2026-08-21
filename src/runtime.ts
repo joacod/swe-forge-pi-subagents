@@ -743,7 +743,15 @@ interface PiCompatibilityVerification {
 }
 
 /** Successful and in-flight checks live only for this host process. */
-const piCompatibilityCache = new Map<string, Promise<PiProbeResult>>();
+interface PiCompatibilityCacheEntry {
+	readonly key: string;
+	readonly promise: Promise<PiProbeResult>;
+	readonly controller: AbortController;
+	waiters: number;
+	finished: boolean;
+}
+
+const piCompatibilityCache = new Map<string, PiCompatibilityCacheEntry>();
 
 function piCompatibilityCacheKey(
 	invocation: ChildInvocation,
@@ -761,37 +769,79 @@ function piCompatibilityCacheKey(
 	return createHash("sha256").update(identity).digest("hex");
 }
 
+async function waitForPiProbe(entry: PiCompatibilityCacheEntry, signal: AbortSignal | undefined): Promise<PiProbeResult> {
+	if (signal?.aborted) return { aborted: true };
+	entry.waiters += 1;
+
+	let aborted = false;
+	let removeAbort: (() => void) | undefined;
+	let resolveAbort!: (result: PiProbeResult) => void;
+	const abortResult = new Promise<PiProbeResult>((resolveAbortResult) => {
+		resolveAbort = resolveAbortResult;
+	});
+	const onAbort = () => {
+		if (aborted) return;
+		aborted = true;
+		entry.waiters -= 1;
+		if (!entry.finished && entry.waiters === 0 && piCompatibilityCache.get(entry.key) === entry) {
+			entry.controller.abort();
+		}
+		resolveAbort({ aborted: true });
+	};
+	if (signal) {
+		signal.addEventListener("abort", onAbort, { once: true });
+		removeAbort = () => signal.removeEventListener("abort", onAbort);
+		if (signal.aborted) onAbort();
+	}
+
+	try {
+		return await (signal ? Promise.race([entry.promise, abortResult]) : entry.promise);
+	} finally {
+		removeAbort?.();
+		if (!aborted) entry.waiters -= 1;
+	}
+}
+
 async function verifyPiVersion(
 	invocation: ChildInvocation,
 	cwd: string,
 	env: NodeJS.ProcessEnv | undefined,
 	signal: AbortSignal | undefined,
 ): Promise<PiCompatibilityVerification> {
-	const key = piCompatibilityCacheKey(invocation, cwd, env);
-	const cached = piCompatibilityCache.get(key);
-	if (cached) return { result: await cached, performed: false };
+	if (signal?.aborted) return { result: { aborted: true }, performed: false };
 
-	const startedAt = performance.now();
-	let pending!: Promise<PiProbeResult>;
-	pending = probePiVersion(invocation, cwd, env, signal).then(
-		(result) => {
-			if (result.version !== undefined && !result.error && !result.aborted) {
-				piCompatibilityCache.set(key, Promise.resolve(result));
-			} else if (piCompatibilityCache.get(key) === pending) {
-				piCompatibilityCache.delete(key);
-			}
-			return result;
-		},
-		(error: unknown) => {
-			if (piCompatibilityCache.get(key) === pending) piCompatibilityCache.delete(key);
-			throw error;
-		},
-	);
-	piCompatibilityCache.set(key, pending);
+	const key = piCompatibilityCacheKey(invocation, cwd, env);
+	let entry = piCompatibilityCache.get(key);
+	let performed = false;
+	let startedAt: number | undefined;
+	if (!entry) {
+		performed = true;
+		startedAt = performance.now();
+		const controller = new AbortController();
+		let pending!: Promise<PiProbeResult>;
+		pending = probePiVersion(invocation, cwd, env, controller.signal).then(
+			(result) => {
+				entry!.finished = true;
+				if (!(result.version !== undefined && !result.error && !result.aborted) && piCompatibilityCache.get(key) === entry) {
+					piCompatibilityCache.delete(key);
+				}
+				return result;
+			},
+			(error: unknown) => {
+				entry!.finished = true;
+				if (piCompatibilityCache.get(key) === entry) piCompatibilityCache.delete(key);
+				throw error;
+			},
+		);
+		entry = { key, promise: pending, controller, waiters: 0, finished: false };
+		piCompatibilityCache.set(key, entry);
+	}
+
+	const result = await waitForPiProbe(entry, signal);
 	return {
-		result: await pending,
-		performed: true,
-		durationMs: elapsedMilliseconds(startedAt),
+		result,
+		performed,
+		...(startedAt === undefined ? {} : { durationMs: elapsedMilliseconds(startedAt) }),
 	};
 }
 
