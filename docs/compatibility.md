@@ -123,13 +123,16 @@ subagent runtime or other production dependency is needed. The build, test,
 lint, and format checks use the existing TypeScript/Node toolchain without
 adding an unneeded formatter or linter dependency.
 
-`projection.ts` intentionally validates a minimal duplicated wire shape because
-SWE-Forge does not currently publish a small versioned schema export. The result
-projection recognizes the current `RESULT_PROFILE`/`FINDINGS`/`EVIDENCE` shape
-and the older `SUMMARY`/`VALIDATION` fixture shape within the tested 0.1.x line;
-it does not define or bundle either contract. This is deferred technical debt:
-validation remains fail-closed until a low-coupling canonical schema boundary
-exists.
+`projection.ts` intentionally validates a minimal duplicated
+`worker_briefing/v1` wire shape because SWE-Forge does not currently publish a
+small versioned schema export. It checks the root-rendered marker/schema,
+concrete `task_id`, profile access, `SUBAGENTS` topology, and `SHARED`
+write-isolation without rendering or loading the canonical task contract. The
+result projection recognizes the current `RESULT_PROFILE`/`FINDINGS`/`EVIDENCE`
+shape and the older `SUMMARY`/`VALIDATION` fixture shape within the tested
+0.1.x line; it does not define or bundle either contract. This is deferred
+technical debt: validation remains fail-closed until a low-coupling canonical
+schema boundary exists.
 
 When updating Pi or SWE-Forge, rerun the repository tests, package-install
 smoke test, and a fixture-backed child invocation. If a public flag, event

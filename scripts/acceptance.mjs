@@ -214,6 +214,23 @@ function resultForAction(run, action) {
 	return run.toolResults.find((result) => result?.details);
 }
 
+function workerBriefing({ taskId, role, objective, writeAccess }) {
+	return `worker_briefing:
+  schema: worker-brief/v1
+  task_id: ${taskId}
+  worker:
+    role: ${role}
+    mode: delegated_worker
+    depth: 1
+    recursive_delegation: false
+  objective: ${objective}
+  permissions:
+    write_access: ${writeAccess}
+    topology: SUBAGENTS
+    write_isolation: SHARED
+`;
+}
+
 async function scenarioA() {
 	const run = await runPi({
 		id: "A",
@@ -231,13 +248,17 @@ async function scenarioA() {
 
 async function scenarioB() {
 	const role = await canonicalRole(["researcher", "reader", "reviewer"]);
-	const taskContract = `TASK_ID: acceptance-read-only
-OBJECTIVE: Read README.md and report its first heading. Do not modify any file.`;
+	const workerBriefingText = workerBriefing({
+		taskId: "acceptance-read-only",
+		role,
+		objective: "Read README.md and report its first heading. Do not modify any file.",
+		writeAccess: "read-only",
+	});
 	const run = await runPi({
 		id: "B",
 		topology: "SUBAGENTS",
 		packageEnabled: true,
-		ticket: `Run exactly one READ_ONLY bounded task with role=${role}, profile=READ_ONLY, expectedOutputContract=result. Call capabilities first. Set taskContract to exactly this JSON string and do not append any surrounding instructions to its value: ${JSON.stringify(taskContract)}. After the run result is returned, report that the canonical result was consumed and do not perform any writable action.`,
+		ticket: `Run exactly one READ_ONLY bounded task with role=${role}, profile=READ_ONLY, expectedOutputContract=result. Call capabilities first. Set workerBriefing to exactly this JSON string and do not append any surrounding instructions to its value: ${JSON.stringify(workerBriefingText)}. After the run result is returned, report that the canonical result was consumed and do not perform any writable action.`,
 	});
 	assert(run.exitCode === 0, `Scenario B Pi exited ${run.exitCode}: ${run.stderr}`);
 	const runCall = run.toolCalls.find((input) => input?.action === "run");
@@ -247,7 +268,8 @@ OBJECTIVE: Read README.md and report its first heading. Do not modify any file.`
 	assert(result?.details?.runtime?.status === "completed", `Scenario B child result was not completed: ${JSON.stringify({ result, toolResults: run.toolResults })}`);
 	assert(/^0\.84\./u.test(result.details.runtime.piVersion ?? ""), `Scenario B did not verify a real supported Pi child: ${result.details.runtime.piVersion ?? "missing"}`);
 	assert(JSON.stringify(result.details.runtime.tools) === JSON.stringify(["read", "grep", "find", "ls"]), "Scenario B exposed unexpected tools");
-	assert(!runCall.taskContract.includes("write_access: read-write"), "Scenario B requested writable access");
+	assert(typeof runCall.workerBriefing === "string", "Scenario B did not send workerBriefing");
+	assert(!runCall.workerBriefing.includes("write_access: read-write"), "Scenario B requested writable access");
 	console.log("PASS B: real READ_ONLY child completed with isolated context and read-only tools");
 }
 
@@ -256,13 +278,17 @@ async function scenarioC() {
 	const directory = await mkdtemp(join(tmpdir(), "swe-forge-acceptance-writable-"));
 	temporaryPaths.push(directory);
 	const marker = join(directory, "bounded-writable-marker.txt");
-	const taskContract = `TASK_ID: acceptance-writable
-OBJECTIVE: Create exactly one file at ${marker} containing exactly ACCEPTANCE_WRITABLE. Do not edit any other file.`;
+	const workerBriefingText = workerBriefing({
+		taskId: "acceptance-writable",
+		role,
+		objective: `Create exactly one file at ${marker} containing exactly ACCEPTANCE_WRITABLE. Do not edit any other file.`,
+		writeAccess: "read-write",
+	});
 	const run = await runPi({
 		id: "C",
 		topology: "SUBAGENTS",
 		packageEnabled: true,
-		ticket: `Run exactly one WRITABLE bounded task with role=${role}, profile=WRITABLE, expectedOutputContract=result. Call capabilities first. Set taskContract to exactly this JSON string and do not append any surrounding instructions to its value: ${JSON.stringify(taskContract)}. The child must create the requested marker, then consume the canonical result. Do not start another child.`,
+		ticket: `Run exactly one WRITABLE bounded task with role=${role}, profile=WRITABLE, expectedOutputContract=result. Call capabilities first. Set workerBriefing to exactly this JSON string and do not append any surrounding instructions to its value: ${JSON.stringify(workerBriefingText)}. The child must create the requested marker, then consume the canonical result. Do not start another child.`,
 	});
 	assert(run.exitCode === 0, `Scenario C Pi exited ${run.exitCode}: ${run.stderr}`);
 	const runCalls = run.toolCalls.filter((input) => input?.action === "run");
@@ -301,7 +327,12 @@ async function scenarioE() {
 	await assertRejectsCode(
 		runtime.executeSWEForgeTask({
 			role: await canonicalRole(["researcher", "reader", "reviewer"], sweForgeRepo),
-			taskContract: "TASK_ID: acceptance-malformed\nOBJECTIVE: fail closed\nwrite_access: read-only\n",
+			workerBriefing: workerBriefing({
+				taskId: "acceptance-malformed",
+				role: await canonicalRole(["researcher", "reader", "reviewer"], sweForgeRepo),
+				objective: "fail closed",
+				writeAccess: "read-only",
+			}),
 			expectedOutputContract: "result",
 			profile: "READ_ONLY",
 			cwd: directory,

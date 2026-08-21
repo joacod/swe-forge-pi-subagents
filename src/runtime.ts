@@ -14,14 +14,13 @@ import {
 import type { SWEForgeDiscoveryOptions } from "./discovery.js";
 import {
 	composeRuntimePrompt,
-	extractTaskIdentifier,
-	loadCanonicalTaskContract,
+	extractWorkerBriefingTaskIdentifier,
 	SWEForgeRuntimeError,
 	type CanonicalOutputValidation,
 	type ExpectedOutputContract,
 	MAX_WORKER_RESULT_BYTES,
 	validateCanonicalOutput,
-	validateTaskContract,
+	validateWorkerBriefing,
 } from "./projection.js";
 
 /** The built-in Pi tools that are available to the child runtime. */
@@ -149,8 +148,8 @@ export interface BuildChildArgsOptions {
 export interface SWEForgeTaskOptions {
 	/** A discovered canonical role name, never a path. */
 	readonly role: string;
-	/** The canonical task contract text supplied by the Forge orchestrator. */
-	readonly taskContract: string;
+	/** The root-rendered worker_briefing/v1 projection supplied for this launch. */
+	readonly workerBriefing: string;
 	readonly expectedOutputContract: ExpectedOutputContract;
 	readonly profile: ChildToolProfile;
 	readonly cwd?: string;
@@ -1248,20 +1247,16 @@ export async function executeSWEForgeTask(options: SWEForgeTaskOptions): Promise
 	validateThinkingLevel(internalOptions.thinkingLevel);
 	const cwd = await canonicalizeCwd(internalOptions.cwd);
 
-	// Validate the installed task contract even though the orchestrator supplies
-	// the concrete task text. This detects canonical contract drift before launch.
-	await loadCanonicalTaskContract(internalOptions.discovery);
-	const taskValidation = validateTaskContract(internalOptions.taskContract, {
-		requireTaskId: internalOptions.expectedOutputContract === "result",
+	const briefingValidation = validateWorkerBriefing(internalOptions.workerBriefing, {
 		expectedWriteAccess: internalOptions.profile,
 	});
 	const prompt = await composeRuntimePrompt({
 		role: internalOptions.role,
-		taskContract: internalOptions.taskContract,
+		workerBriefing: internalOptions.workerBriefing,
 		expectedOutputContract: internalOptions.expectedOutputContract,
 		discovery: internalOptions.discovery,
 	});
-	const taskId = taskValidation.taskId ?? extractTaskIdentifier(internalOptions.taskContract);
+	const taskId = briefingValidation.taskId ?? extractWorkerBriefingTaskIdentifier(internalOptions.workerBriefing);
 	const child = await runPiChildAgent({
 		task: "Execute the bounded SWE-Forge task and return only the required canonical output.",
 		systemPrompt: prompt,

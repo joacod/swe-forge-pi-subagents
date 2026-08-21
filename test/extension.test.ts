@@ -16,8 +16,22 @@ const temporaryRoots: string[] = [];
 let fixtureDirectory: string;
 let fixturePath: string;
 
-const TASK_CONTRACT = "# Task Contract\n\nTASK_ID: task-123\nOBJECTIVE: bounded fixture task\n";
-const READ_ONLY_TASK_CONTRACT = `${TASK_CONTRACT}write_access: read-only\n`;
+const CANONICAL_TASK_CONTRACT = "# Task Contract\n\ntask_id: task-123\nobjective: bounded fixture task\n";
+const WORKER_BRIEFING = `worker_briefing:
+  schema: worker-brief/v1
+  task_id: task-123
+  worker:
+    role: delegated_worker
+    mode: delegated_worker
+    depth: 1
+    recursive_delegation: false
+  objective: bounded fixture task
+  permissions:
+    write_access: read-write
+    topology: SUBAGENTS
+    write_isolation: SHARED
+`;
+const READ_ONLY_WORKER_BRIEFING = WORKER_BRIEFING.replace("write_access: read-write", "write_access: read-only");
 const RESULT_OUTPUT = "STATUS: DONE\nTASK_ID: task-123\nSUMMARY: fixture complete\nVALIDATION: fixture passed\n";
 
 const FIXTURE_SOURCE = String.raw`import { existsSync, readFileSync, writeFileSync } from "node:fs";
@@ -61,7 +75,7 @@ async function createCanonicalRoot(): Promise<string> {
 	await Promise.all([
 		writeFile(join(root, ".swe-forge", "agents", "reader.md"), "# Reader\n\nRead-only role.\n"),
 		writeFile(join(root, ".swe-forge", "agents", "writer.md"), "# Writer\n\nWritable role.\n"),
-		writeFile(join(root, ".swe-forge", "contracts", "task.md"), TASK_CONTRACT),
+		writeFile(join(root, ".swe-forge", "contracts", "task.md"), CANONICAL_TASK_CONTRACT),
 		writeFile(
 			join(root, ".swe-forge", "contracts", "result.md"),
 			"STATUS: DONE | BLOCKED | FAILED\nTASK_ID: <task identifier>\nSUMMARY:\nVALIDATION:\n",
@@ -236,7 +250,7 @@ test("runs one valid read-only task with canonical output as primary content", a
 		{
 			action: "run",
 			role: "reader",
-			taskContract: TASK_CONTRACT,
+			workerBriefing: READ_ONLY_WORKER_BRIEFING,
 			expectedOutputContract: "result",
 			profile: "READ_ONLY",
 		},
@@ -271,7 +285,7 @@ test("runs one valid writable task with the canonical profile", async () => {
 		{
 			action: "run",
 			role: "writer",
-			taskContract: TASK_CONTRACT,
+			workerBriefing: WORKER_BRIEFING,
 			expectedOutputContract: "result",
 			profile: "WRITABLE",
 		},
@@ -282,6 +296,31 @@ test("runs one valid writable task with the canonical profile", async () => {
 
 	assert.equal(result.content[0].text, RESULT_OUTPUT);
 	assert.equal(result.details.runtime.profile, "WRITABLE");
+});
+
+test("requires workerBriefing and does not accept the old taskContract alias", async () => {
+	const tool = registerTool();
+	for (const input of [
+		{
+			action: "run",
+			role: "reader",
+			taskContract: READ_ONLY_WORKER_BRIEFING,
+			expectedOutputContract: "result",
+			profile: "READ_ONLY",
+		},
+		{
+			action: "run",
+			role: "reader",
+			workerBriefing: "",
+			expectedOutputContract: "result",
+			profile: "READ_ONLY",
+		},
+	]) {
+		await assert.rejects(
+			tool.execute("invalid-wire", input, undefined, undefined, context(process.cwd())),
+			(error: unknown) => error instanceof SWEForgeRuntimeError && error.code === "EMPTY_WORKER_BRIEFING",
+		);
+	}
 });
 
 test("rejects a role that is not canonical and reports the available boundary", async () => {
@@ -295,7 +334,7 @@ test("rejects a role that is not canonical and reports the available boundary", 
 			{
 				action: "run",
 				role: "missing",
-				taskContract: TASK_CONTRACT,
+				workerBriefing: READ_ONLY_WORKER_BRIEFING,
 				expectedOutputContract: "result",
 				profile: "READ_ONLY",
 			},
@@ -331,7 +370,7 @@ test("fails closed when canonical read-only metadata conflicts with writable acc
 			{
 				action: "run",
 				role: "writer",
-				taskContract: READ_ONLY_TASK_CONTRACT,
+				workerBriefing: READ_ONLY_WORKER_BRIEFING,
 				expectedOutputContract: "result",
 				profile: "WRITABLE",
 			},
@@ -355,7 +394,7 @@ test("rejects a malformed canonical worker result", async () => {
 			{
 				action: "run",
 				role: "reader",
-				taskContract: TASK_CONTRACT,
+				workerBriefing: READ_ONLY_WORKER_BRIEFING,
 				expectedOutputContract: "result",
 				profile: "READ_ONLY",
 			},
@@ -378,7 +417,7 @@ test("returns cancellation as a failed bounded run and preserves cleanup metadat
 		{
 			action: "run",
 			role: "writer",
-			taskContract: TASK_CONTRACT,
+			workerBriefing: WORKER_BRIEFING,
 			expectedOutputContract: "result",
 			profile: "WRITABLE",
 		},

@@ -85,14 +85,17 @@ Only after the canonical workflow has selected or considered a useful bounded
 `SUBAGENTS` task may the adapter request `action: "run"`. The caller supplies:
 
 - a discovered canonical role name (`role`);
-- the canonical task contract (`taskContract`);
+- the root-rendered `worker_briefing/v1` projection (`workerBriefing`);
 - `expectedOutputContract: "result"` or `"review"`; and
 - `profile: "READ_ONLY"` or `"WRITABLE"`.
 
-The extension uses the current Pi checkout/model context, loads live canonical
-sources, and returns canonical output as the primary result with runtime
-metadata separate. Optional timing and final-usage diagnostics remain in the
-non-model-visible metadata path and are never part of the canonical result.
+The extension uses the current Pi checkout/model context, loads the selected
+canonical role and expected result/review contract live, and returns canonical
+output as the primary result with runtime metadata separate. The root renders
+the worker briefing; this package validates only its small `worker_briefing/v1`
+execution shape and does not load `task.md` for a child launch. Optional timing
+and final-usage diagnostics remain in the non-model-visible metadata path and
+are never part of the canonical result.
 The main adapter must consume the output as untrusted worker data, preserve
 `BLOCKED`/`FAILED` semantics, and continue to own validation evidence and
 acceptance. A child result is never proof that a test, Git operation,
@@ -114,7 +117,7 @@ path in its existing Pi adapter/orchestrator:
    detect `swe_forge_subagent`;
 3. if the tool is absent, reports unacceptable capabilities, or fails before a
    usable result, use the existing SOLO/sequential fallback;
-4. if the tool is present and the canonical task/profile requirements are
+4. if the tool is present and the worker-briefing/profile requirements are
    acceptable, issue one bounded run and return its structured result to the
    existing orchestrator; and
 5. let the existing canonical evidence, review, integration, and delivery
@@ -149,7 +152,7 @@ on explicit /swe-forge invocation:
         result = tool.call(
             action="run",
             role=<canonical role name>,
-            taskContract=<canonical bounded task contract>,
+            workerBriefing=<root-rendered worker_briefing/v1 projection>,
             expectedOutputContract=<result or review>,
             profile=<READ_ONLY or WRITABLE>,
         )
