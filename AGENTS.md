@@ -42,8 +42,9 @@ second owner of them.
   metadata are owned by the runtime, `package.json`, and
   [`docs/compatibility.md`](docs/compatibility.md); fail closed rather than
   silently widening them.
-- Keep the canonical worker result within its current documented bound (64 KiB)
-  and separate from runtime diagnostics. Oversized, truncated, malformed,
+- Preserve the bounded canonical worker result; see
+  [`docs/compatibility.md`](docs/compatibility.md) for the current limit. Keep
+  it separate from runtime diagnostics. Oversized, truncated, malformed,
   `BLOCKED`, or `FAILED` results must not be turned into success, and child
   output is never Git, test, or delivery evidence. Cancellation must remain an
   `aborted` outcome, with best-effort process cleanup and temporary prompt
@@ -70,11 +71,11 @@ architectural reason and coordinated compatibility work.
 ## Evaluated direction: in-process `AgentSession`
 
 Replacing the subprocess runtime with an in-process Pi `AgentSession` was
-recently evaluated in [package PR #15](https://github.com/joacod/swe-forge-pi-subagents/pull/15)
+evaluated in [package PR #15](https://github.com/joacod/swe-forge-pi-subagents/pull/15)
 and companion [SWE Forge PR #45](https://github.com/joacod/swe-forge/pull/45).
-Those PRs were closed intentionally; the migration is not adopted at this
-time. Small-task startup improved, but realistic task performance did not show
-a reliable enough improvement and overall/parallel gains were limited. The
+Those PRs were intentionally closed; the migration was not adopted. Small-task
+startup improved, but realistic task performance did not show a reliable enough
+improvement and overall/parallel gains were limited. The
 in-process boundary also weakened process isolation and worst-case forced
 termination/cleanup guarantees; cancellation/lifecycle, retry/compaction, and
 system-context behavior differed. The apparent context/token advantage was
@@ -84,10 +85,10 @@ compatibility-verification requirements remain useful guarantees.
 
 Do not revive that migration casually or relax the capability contract merely
 to support it. Reconsider it if Pi's runtime, isolation, or lifecycle
-capabilities change materially, or new evidence changes the tradeoff. Separately,
-reducing unnecessary child system/context overhead *within the subprocess
-architecture* remains a valid future experiment only if all current guarantees
-are preserved; it has not been implemented here.
+capabilities change materially, or new evidence changes the tradeoff.
+Separately, reducing unnecessary child system/context overhead *within the
+subprocess architecture* is a legitimate optimization when it preserves the
+current isolation, lifecycle, compatibility, and cleanup guarantees.
 
 ## Sources of truth
 
@@ -143,5 +144,4 @@ validation) rather than silently widening one side of the contract.
 Before finishing, verify focused tests for changed behavior, applicable
 type/build/lint/format checks, documentation for public behavior changes, a
 final diff containing only intended files, and that no canonical SWE Forge
-ownership has been duplicated. Do not modify product/runtime code for this
-maintenance guide unless validation proves it is necessary.
+ownership has been duplicated.
