@@ -90,12 +90,10 @@ async function writeRunState(directory, id, topology) {
 		statePath,
 		`workflow: swe-forge
 workflow_version: 1
-schema_version: 2
+schema_version: 3
 run_id: acceptance-${id}
 status: running
 requested_mode: ${topology}
-preferred_mode: ${topology}
-execution_mode: ${topology}
 requested_provider: AUTO
 execution_provider: NONE
 delegation_backend: NATIVE
@@ -105,10 +103,13 @@ invocation_checkout:
 delivery_checkout:
   path: ${checkout}
 routing:
-  current: ${topology}
+  initial: ${topology}
   preferred: ${topology}
+  selected: ${topology}
+  current: ${topology}
   context_value:
     projected_pressure: low
+delivery_mode: GUIDED
 continuation:
   workflow_active: true
   workflow: ticket
