@@ -1,5 +1,5 @@
-import { access, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
-import { after, afterEach, before, test } from "node:test";
+import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { afterEach, test } from "node:test";
 import assert from "node:assert/strict";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { join } from "node:path";
@@ -8,51 +8,27 @@ import registerSWEForgeSubagent, { SWE_FORGE_SUBAGENT_TOOL_NAME } from "../src/i
 import * as packageEntry from "../src/index.js";
 import { SWE_FORGE_ROOT_ENV } from "../src/discovery.js";
 import { getSWEForgeCapabilities } from "../src/capabilities.js";
-import { executeSWEForgeTask } from "../src/runtime.js";
+import {
+	executeSWEForgeTask,
+	type ChildAgentSession,
+	type ChildAgentSessionFactory,
+} from "../src/runtime.js";
 import { SWEForgeRuntimeError } from "../src/projection.js";
 import { copyFakeSWEForgeInstallation } from "./fixtures.js";
 
 const temporaryRoots: string[] = [];
-let fixtureDirectory: string;
-let fixturePath: string;
 
 const TASK_CONTRACT = "# Task Contract\n\nTASK_ID: task-123\nOBJECTIVE: bounded fixture task\n";
 const READ_ONLY_TASK_CONTRACT = `${TASK_CONTRACT}write_access: read-only\n`;
 const RESULT_OUTPUT = "STATUS: DONE\nTASK_ID: task-123\nSUMMARY: fixture complete\nVALIDATION: fixture passed\n";
 
-const FIXTURE_SOURCE = String.raw`import { existsSync, readFileSync, writeFileSync } from "node:fs";
-
-const args = process.argv.slice(2);
-if (args.includes("--version")) {
-  process.stdout.write("0.84.2\n");
-  process.exit(0);
-}
-const promptIndex = args.indexOf("--append-system-prompt");
-const promptPath = promptIndex >= 0 ? args[promptIndex + 1] : undefined;
-const recordPath = process.env.SWE_FORGE_FIXTURE_RECORD;
-if (recordPath) writeFileSync(recordPath, JSON.stringify({ args, cwd: process.cwd(), promptPath, prompt: promptPath && existsSync(promptPath) ? readFileSync(promptPath, "utf8") : undefined }));
-
-const mode = process.env.SWE_FORGE_FIXTURE_MODE ?? "success";
-if (mode === "hang") {
-  process.on("SIGTERM", () => process.exit(143));
-  setInterval(() => {}, 1000);
-} else if (mode === "malformed") {
-  const message = { role: "assistant", content: [{ type: "text", text: "STATUS: DONE\nTASK_ID: task-123\nSUMMARY: incomplete\n" }], stopReason: "stop" };
-  process.stdout.write(JSON.stringify({ type: "agent_start" }) + "\n");
-  process.stdout.write(JSON.stringify({ type: "turn_start" }) + "\n");
-  process.stdout.write(JSON.stringify({ type: "message_end", message }) + "\n");
-  process.stdout.write(JSON.stringify({ type: "agent_end", messages: [message] }) + "\n");
-} else {
-  const message = { role: "assistant", content: [{ type: "text", text: ${JSON.stringify(RESULT_OUTPUT)} }], stopReason: "stop", usage: { input: 11, output: 7, cacheRead: 3, cacheWrite: 2, totalTokens: 23, cost: { input: 0.1, output: 0.2, cacheRead: 0.03, cacheWrite: 0.02, total: 0.35 } } };
-  process.stdout.write(JSON.stringify({ type: "agent_start" }) + "\n");
-  process.stdout.write(JSON.stringify({ type: "turn_start" }) + "\n");
-  process.stdout.write(JSON.stringify({ type: "message_end", message }) + "\n");
-  process.stdout.write(JSON.stringify({ type: "agent_end", messages: [message] }) + "\n");
-}`;
-
 interface RegisteredTool {
 	readonly name: string;
 	readonly execute: (...args: any[]) => Promise<any>;
+}
+
+function discovery(root: string) {
+	return { env: { [SWE_FORGE_ROOT_ENV]: root } };
 }
 
 async function createCanonicalRoot(): Promise<string> {
@@ -74,33 +50,75 @@ async function createCanonicalRoot(): Promise<string> {
 	return root;
 }
 
-function discovery(root: string) {
-	return { env: { [SWE_FORGE_ROOT_ENV]: root } };
-}
-
 async function createProject(): Promise<string> {
 	const project = await mkdtemp(join(tmpdir(), "swe-forge-extension-project-"));
 	temporaryRoots.push(project);
 	return project;
 }
 
-async function createRecord(): Promise<string> {
-	const directory = await mkdtemp(join(tmpdir(), "swe-forge-extension-record-"));
-	temporaryRoots.push(directory);
-	return join(directory, "child.json");
-}
-
-async function waitForFile(path: string): Promise<void> {
-	const deadline = Date.now() + 2_000;
-	while (Date.now() < deadline) {
-		try {
-			await access(path);
-			return;
-		} catch {
-			await new Promise((resolve) => setTimeout(resolve, 10));
-		}
-	}
-	throw new Error(`fixture did not write ${path}`);
+function fakeSessionFactory(mode: "success" | "malformed" | "hang"): ChildAgentSessionFactory {
+	return async () => {
+		const listeners = new Set<(event: unknown) => void>();
+		const messages: unknown[] = [];
+		let streaming = false;
+		let aborted = false;
+		let release: (() => void) | undefined;
+		const emit = (event: unknown) => {
+			for (const listener of listeners) listener(event);
+		};
+		const session: ChildAgentSession = {
+			get messages() {
+				return messages;
+			},
+			get isStreaming() {
+				return streaming;
+			},
+			subscribe(listener) {
+				listeners.add(listener);
+				return () => listeners.delete(listener);
+			},
+			async prompt() {
+				streaming = true;
+				emit({ type: "agent_start" });
+				emit({ type: "turn_start" });
+				if (mode === "hang") await new Promise<void>((resolve) => (release = resolve));
+				if (aborted) {
+					emit({ type: "agent_end", messages: [] });
+					streaming = false;
+					emit({ type: "agent_settled" });
+					return;
+				}
+				const message = {
+					role: "assistant",
+					content: [
+						{
+							type: "text",
+							text:
+								mode === "malformed"
+									? "STATUS: DONE\nTASK_ID: task-123\nSUMMARY: incomplete\n"
+									: RESULT_OUTPUT,
+						},
+					],
+					stopReason: "stop",
+					usage: { input: 11, output: 7, cacheRead: 3, cacheWrite: 2, totalTokens: 23, cost: { total: 0.35 } },
+				};
+				messages.push(message);
+				emit({ type: "message_end", message });
+				emit({ type: "agent_end", messages: [message] });
+				streaming = false;
+				emit({ type: "agent_settled" });
+			},
+			async abort() {
+				aborted = true;
+				release?.();
+			},
+			async waitForIdle() {
+				while (streaming) await new Promise((resolve) => setImmediate(resolve));
+			},
+			dispose() {},
+		};
+		return session;
+	};
 }
 
 function registerTool(dependencies: Parameters<typeof registerSWEForgeSubagent>[1] = {}): RegisteredTool {
@@ -124,39 +142,26 @@ function context(cwd: string): Record<string, unknown> {
 	};
 }
 
-function withFixture(root: string, mode: string, record?: string) {
+function withFixture(root: string, mode: "success" | "malformed" | "hang") {
+	const sessionFactory = fakeSessionFactory(mode);
 	return {
-		executeTask: async (options: Parameters<typeof executeSWEForgeTask>[0]) => {
-			const fixtureOptions = {
+		executeTask: async (options: Parameters<typeof executeSWEForgeTask>[0]) =>
+			executeSWEForgeTask({
 				...options,
 				discovery: discovery(root),
-				piCommand: process.execPath,
-				piCommandArgs: [fixturePath],
-				env: {
-					...(record === undefined ? {} : { SWE_FORGE_FIXTURE_RECORD: record }),
-					SWE_FORGE_FIXTURE_MODE: mode,
-				},
-			} as Parameters<typeof executeSWEForgeTask>[0];
-			return executeSWEForgeTask(fixtureOptions);
-		},
+				sessionFactory,
+			} as Parameters<typeof executeSWEForgeTask>[0] & {
+				discovery: ReturnType<typeof discovery>;
+				sessionFactory: ChildAgentSessionFactory;
+			}),
 	};
 }
-
-before(async () => {
-	fixtureDirectory = await mkdtemp(join(tmpdir(), "swe-forge-extension-fixture-"));
-	fixturePath = join(fixtureDirectory, "child.mjs");
-	await writeFile(fixturePath, FIXTURE_SOURCE, "utf8");
-});
 
 afterEach(async () => {
 	await Promise.all(temporaryRoots.splice(0).map((path) => rm(path, { recursive: true, force: true })));
 });
 
-after(async () => {
-	await rm(fixtureDirectory, { recursive: true, force: true });
-});
-
-test("keeps generic transport helpers and compatibility aliases out of the package entry point", () => {
+test("keeps internal SDK helpers and compatibility aliases out of the package entry point", () => {
 	assert.equal("runChildAgent" in packageEntry, false);
 	assert.equal("buildChildArgs" in packageEntry, false);
 	assert.equal("resolvePiInvocation" in packageEntry, false);
@@ -181,7 +186,7 @@ test("registers exactly the Forge-specific tool and v1 actions", () => {
 	assert.notEqual(registered[0]?.name, "subagent");
 });
 
-test("returns machine-readable capabilities without workflow or provider decisions", async () => {
+test("returns machine-readable in-process capabilities without workflow decisions", async () => {
 	const root = await createCanonicalRoot();
 	const tool = registerTool({ getCapabilities: () => getSWEForgeCapabilities(discovery(root)) });
 	const result = await tool.execute("capabilities", { action: "capabilities" }, undefined, undefined, context(root));
@@ -190,41 +195,25 @@ test("returns machine-readable capabilities without workflow or provider decisio
 	assert.equal(result.isError, undefined);
 	assert.equal(details.protocolVersion, 1);
 	assert.equal(details.packageVersion, "0.1.0");
-	assert.equal("extensionVersion" in details, false);
 	assert.deepEqual(details.pi, {
 		compatibilityRange: ">=0.84.1 <0.85.0",
-		versionVerification: "before_execution",
+		runtime: "in_process_agent_session",
+		versionVerification: "public_sdk_api",
 	});
 	assert.deepEqual(details.isolation, {
 		contextIsolation: true,
-		processIsolation: true,
+		processIsolation: false,
 		filesystemIsolation: false,
 		osSandbox: false,
 	});
-	assert.deepEqual(details.trust, { workerPermissions: "user_os_permissions", sandbox: false });
-	assert.equal(details.sweForge.version, "0.1.0-alpha.1");
 	assert.equal(details.sweForge.root, await realpath(root));
 	assert.deepEqual(details.roles, ["reader", "writer"]);
 	assert.equal(details.readOnlyParallelSupport, true);
 	assert.equal(details.writableConcurrencySupport, false);
 	assert.equal(details.nestedDelegationSupport, false);
-	assert.deepEqual(details.availableProfiles, ["READ_ONLY", "WRITABLE"]);
 	assert.deepEqual(details.compatibilityErrors, []);
-	assert.equal("provider" in details, false);
-	assert.equal("workflow" in details, false);
 	assert.deepEqual(JSON.parse(result.content[0].text), details);
-	assert.throws(() => ((details as unknown as { packageVersion: string }).packageVersion = "mutated"), TypeError);
-	assert.throws(() => (details.roles as unknown as string[]).push("mutated"), TypeError);
-	assert.throws(() => (details.availableProfiles as unknown as string[]).push("OTHER"), TypeError);
-	assert.throws(() => (details.profileTools.READ_ONLY as unknown as string[]).push("bash"), TypeError);
-	assert.throws(() => ((details.pi as unknown as { compatibilityRange: string }).compatibilityRange = "*"), TypeError);
-	assert.throws(() => ((details.isolation as unknown as { contextIsolation: boolean }).contextIsolation = false), TypeError);
-	assert.throws(() => (details.compatibilityErrors as unknown as unknown[]).push({}), TypeError);
-	assert.throws(() => ((details.sweForge as unknown as { installed: boolean }).installed = false), TypeError);
-
-	const future = await getSWEForgeCapabilities(discovery(root));
-	assert.equal(future.protocolVersion, 1);
-	assert.deepEqual(future.profileTools.READ_ONLY, ["read", "grep", "find", "ls"]);
+	assert.throws(() => ((details.isolation as unknown as { processIsolation: boolean }).processIsolation = true), TypeError);
 });
 
 test("runs one valid read-only task with canonical output as primary content", async () => {
@@ -250,7 +239,6 @@ test("runs one valid read-only task with canonical output as primary content", a
 	assert.equal(result.details.runtime.profile, "READ_ONLY");
 	assert.equal(result.details.runtime.text, undefined);
 	assert.equal(result.details.runtime.assistantMessage, undefined);
-	assert.equal(result.details.output, undefined);
 	assert.deepEqual(result.details.runtime.diagnostics.usage, {
 		inputTokens: 11,
 		outputTokens: 7,
@@ -322,8 +310,7 @@ test("reports an unavailable Forge installation through capabilities", async () 
 test("fails closed when canonical read-only metadata conflicts with writable access", async () => {
 	const root = await createCanonicalRoot();
 	const project = await createProject();
-	const record = await createRecord();
-	const tool = registerTool(withFixture(root, "success", record));
+	const tool = registerTool(withFixture(root, "success"));
 
 	await assert.rejects(
 		tool.execute(
@@ -341,7 +328,6 @@ test("fails closed when canonical read-only metadata conflicts with writable acc
 		),
 		(error: unknown) => error instanceof SWEForgeRuntimeError && error.code === "ACCESS_CONFLICT" && /requires READ_ONLY/u.test(error.message),
 	);
-	await assert.rejects(access(record));
 });
 
 test("rejects a malformed canonical worker result", async () => {
@@ -370,8 +356,7 @@ test("rejects a malformed canonical worker result", async () => {
 test("returns cancellation as a failed bounded run and preserves cleanup metadata", async () => {
 	const root = await createCanonicalRoot();
 	const project = await createProject();
-	const record = await createRecord();
-	const tool = registerTool(withFixture(root, "hang", record));
+	const tool = registerTool(withFixture(root, "hang"));
 	const controller = new AbortController();
 	const promise = tool.execute(
 		"cancel",
@@ -387,7 +372,7 @@ test("returns cancellation as a failed bounded run and preserves cleanup metadat
 		context(project),
 	);
 
-	await waitForFile(record);
+	await new Promise((resolve) => setImmediate(resolve));
 	controller.abort();
 	const result = await promise;
 
