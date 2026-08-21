@@ -1048,7 +1048,10 @@ async function runPiChildAgentUnlocked(
 			await writeFile(systemPromptPath, options.systemPrompt, { encoding: "utf8", mode: 0o600 });
 		}
 		if (options.signal?.aborted) {
-			return { status: "aborted", exitCode: null, text: "", stderr: "", errorMessage: "Child aborted before launch" };
+			return withDiagnostics(
+				{ status: "aborted", exitCode: null, text: "", stderr: "", errorMessage: "Child aborted before launch" },
+				{ compatibilityCheckDurationMs },
+			);
 		}
 
 		const childArgs = buildChildArgs({
@@ -1072,7 +1075,10 @@ async function runPiChildAgentUnlocked(
 				windowsHide: true,
 			});
 		} catch (error) {
-			return failedResult(error instanceof Error ? error.message : String(error));
+			return withDiagnostics(
+				failedResult(error instanceof Error ? error.message : String(error)),
+				childDiagnostics(state, spawnStartedAt, compatibilityCheckDurationMs),
+			);
 		}
 
 		consumeJsonLines(
