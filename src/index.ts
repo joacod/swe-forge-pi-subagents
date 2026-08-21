@@ -81,7 +81,15 @@ export interface SWEForgeSubagentExtensionDependencies {
 	readonly getCapabilities?: () => Promise<SWEForgeCapabilities>;
 }
 
-function inputError(code: "INVALID_ROLE_NAME" | "EMPTY_WORKER_BRIEFING" | "INVALID_EXPECTED_OUTPUT_CONTRACT" | "INVALID_TOOL_PROFILE", message: string): never {
+function inputError(
+	code:
+		| "INVALID_ROLE_NAME"
+		| "EMPTY_WORKER_BRIEFING"
+		| "INVALID_WORKER_BRIEFING"
+		| "INVALID_EXPECTED_OUTPUT_CONTRACT"
+		| "INVALID_TOOL_PROFILE",
+	message: string,
+): never {
 	throw new SWEForgeRuntimeError(code, message);
 }
 
@@ -94,6 +102,12 @@ function requiredRunInput(params: SubagentParameters): {
 	const role = params.role;
 	if (typeof role !== "string" || role.trim().length === 0) {
 		return inputError("INVALID_ROLE_NAME", "run requires a canonical role name.");
+	}
+	if (Object.prototype.hasOwnProperty.call(params, "taskContract")) {
+		return inputError(
+			"INVALID_WORKER_BRIEFING",
+			"taskContract is not accepted; run requires the workerBriefing worker_briefing/v1 projection.",
+		);
 	}
 	if (typeof params.workerBriefing !== "string" || params.workerBriefing.trim().length === 0) {
 		return inputError(

@@ -300,27 +300,38 @@ test("runs one valid writable task with the canonical profile", async () => {
 
 test("requires workerBriefing and does not accept the old taskContract alias", async () => {
 	const tool = registerTool();
-	for (const input of [
-		{
-			action: "run",
-			role: "reader",
-			taskContract: READ_ONLY_WORKER_BRIEFING,
-			expectedOutputContract: "result",
-			profile: "READ_ONLY",
-		},
-		{
-			action: "run",
-			role: "reader",
-			workerBriefing: "",
-			expectedOutputContract: "result",
-			profile: "READ_ONLY",
-		},
-	]) {
-		await assert.rejects(
-			tool.execute("invalid-wire", input, undefined, undefined, context(process.cwd())),
-			(error: unknown) => error instanceof SWEForgeRuntimeError && error.code === "EMPTY_WORKER_BRIEFING",
-		);
-	}
+	await assert.rejects(
+		tool.execute(
+			"legacy-wire",
+			{
+				action: "run",
+				role: "reader",
+				taskContract: READ_ONLY_WORKER_BRIEFING,
+				expectedOutputContract: "result",
+				profile: "READ_ONLY",
+			},
+			undefined,
+			undefined,
+			context(process.cwd()),
+		),
+		(error: unknown) => error instanceof SWEForgeRuntimeError && error.code === "INVALID_WORKER_BRIEFING",
+	);
+	await assert.rejects(
+		tool.execute(
+			"empty-wire",
+			{
+				action: "run",
+				role: "reader",
+				workerBriefing: "",
+				expectedOutputContract: "result",
+				profile: "READ_ONLY",
+			},
+			undefined,
+			undefined,
+			context(process.cwd()),
+		),
+		(error: unknown) => error instanceof SWEForgeRuntimeError && error.code === "EMPTY_WORKER_BRIEFING",
+	);
 });
 
 test("rejects a role that is not canonical and reports the available boundary", async () => {
