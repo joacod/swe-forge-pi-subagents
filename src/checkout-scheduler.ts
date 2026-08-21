@@ -34,7 +34,7 @@ interface CheckoutState {
  *
  * Existing symlink aliases are collapsed so `/project` and `/link-to-project`
  * cannot acquire independent in-process locks. A not-yet-created path keeps a
- * lexical identity; the runtime rejects such paths before spawning a child.
+ * lexical identity; the runtime rejects such paths before starting a child session.
  */
 export function normalizeCheckout(cwd: string): string {
 	if (typeof cwd !== "string" || cwd.length === 0 || cwd.includes("\0")) {

@@ -16,9 +16,9 @@ import {
 export * from "./capabilities.js";
 export * from "./discovery.js";
 export * from "./projection.js";
-// Keep the package entry focused on the canonical task primitive. The generic
-// Pi transport, argument builder, and checkout scheduler remain implementation
-// details rather than a second child-agent API.
+// Keep the package entry focused on the canonical task primitive. The SDK
+// session factory and checkout scheduler remain implementation details rather
+// than a second child-agent API.
 export {
 	CHILD_TOOL_PROFILES,
 	READ_ONLY_TOOLS,

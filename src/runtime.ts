@@ -1,11 +1,14 @@
-import { createHash } from "node:crypto";
-import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync } from "node:fs";
-import { mkdtemp, realpath, rm, stat, writeFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
-import { tmpdir } from "node:os";
-import { StringDecoder } from "node:string_decoder";
+import { realpath, stat } from "node:fs/promises";
 import { performance } from "node:perf_hooks";
+import {
+	createAgentSession,
+	createExtensionRuntime,
+	ModelRuntime,
+	SessionManager,
+	SettingsManager,
+	type AgentSession,
+	type ResourceLoader,
+} from "@earendil-works/pi-coding-agent";
 import {
 	checkoutScheduler,
 	isCheckoutAbortError,
@@ -31,11 +34,7 @@ export type BuiltinTool = (typeof BUILTIN_TOOLS)[number];
 /** The exact read-only capability profile. It intentionally contains no shell. */
 export const READ_ONLY_TOOLS = Object.freeze(["read", "grep", "find", "ls"] as const) satisfies readonly BuiltinTool[];
 
-/**
- * The exact writable capability profile. These are the current built-ins needed
- * to edit files and run local validation; no generic or delegation tool is part
- * of either profile.
- */
+/** The exact writable capability profile used by bounded SWE-Forge workers. */
 export const WRITABLE_TOOLS = Object.freeze(
 	["read", "grep", "find", "ls", "edit", "write", "bash"] as const,
 ) satisfies readonly BuiltinTool[];
@@ -47,21 +46,16 @@ export const CHILD_TOOL_PROFILES = Object.freeze({
 
 export type ChildToolProfile = keyof typeof CHILD_TOOL_PROFILES;
 
-/** Names denied even when a future Pi configuration tries to add extensions. */
+/** Names denied even when a future SDK resource configuration tries to add extensions. */
 export const DELEGATION_TOOL_NAMES = Object.freeze(["subagent", "swe_forge_subagent"] as const);
 
-/** Keep diagnostics bounded; the final worker output is bounded separately. */
-export const MAX_STDERR_BYTES = 16 * 1024;
-export const MAX_EVENT_LINE_BYTES = 512 * 1024;
-
-/**
- * Pi's CLI/event boundary is tested against this compatibility line. A child
- * launched through an injected command is a fixture seam and is not probed.
- */
+/** Pi's public SDK compatibility line for the in-process AgentSession runtime. */
 export const PI_COMPATIBILITY_POLICY = {
 	range: ">=0.84.1 <0.85.0",
 	minimum: "0.84.1",
 	maximumExclusive: "0.85.0",
+	runtime: "in_process_agent_session",
+	verification: "public_sdk_api",
 } as const;
 
 export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
@@ -71,7 +65,7 @@ export type JsonObject = Record<string, unknown>;
 export interface ChildAgentOptions {
 	/** The one bounded user message sent to the child. */
 	readonly task: string;
-	/** Canonical role/task/output instructions written to a temporary file. */
+	/** Canonical role/task/output instructions installed as the child system prompt. */
 	readonly systemPrompt?: string;
 	/** The project checkout in which Pi creates its built-in tools. */
 	readonly cwd?: string;
@@ -80,18 +74,11 @@ export interface ChildAgentOptions {
 	readonly thinkingLevel?: ThinkingLevel;
 	/** Preferred public capability selection. */
 	readonly profile?: ChildToolProfile;
-	/**
-	 * Low-level transport compatibility seam. High-level Forge execution always
-	 * uses one of the two named profiles.
-	 */
+	/** Low-level compatibility seam for callers that already have an exact profile. */
 	readonly tools?: readonly string[];
 	readonly signal?: AbortSignal;
-	/** Test seam for a Pi executable or fixture. Defaults to the active Pi CLI. */
-	readonly piCommand?: string;
-	/** Arguments placed before the runner's Pi CLI arguments. */
-	readonly piCommandArgs?: readonly string[];
-	/** Additional child environment values. The parent environment is inherited. */
-	readonly env?: NodeJS.ProcessEnv;
+	/** @internal Deterministic session seam; not exposed from the package entry point. */
+	readonly sessionFactory?: ChildAgentSessionFactory;
 }
 
 export interface ChildAgentUsageDiagnostics {
@@ -104,47 +91,44 @@ export interface ChildAgentUsageDiagnostics {
 }
 
 export interface ChildAgentRuntimeDiagnostics {
-	readonly compatibilityCheckDurationMs?: number;
 	readonly queueWaitDurationMs?: number;
-	readonly childStartupDurationMs?: number;
+	readonly sessionInitializationDurationMs?: number;
 	readonly agentExecutionDurationMs?: number;
 	readonly totalRuntimeDurationMs?: number;
 	readonly usage?: ChildAgentUsageDiagnostics;
 	readonly turns?: number;
 }
 
-type MutableChildAgentRuntimeDiagnostics = {
-	-readonly [Key in keyof ChildAgentRuntimeDiagnostics]?: ChildAgentRuntimeDiagnostics[Key];
-};
-
 export interface ChildAgentResult {
 	readonly status: ChildAgentStatus;
-	readonly exitCode: number | null;
 	readonly text: string;
 	readonly assistantMessage?: JsonObject;
-	readonly stderr: string;
 	readonly stopReason?: string;
 	readonly errorMessage?: string;
 	readonly outputTruncated?: boolean;
-	readonly eventStreamError?: string;
-	readonly piVersion?: string;
 	readonly diagnostics?: ChildAgentRuntimeDiagnostics;
 }
 
-export interface ChildInvocation {
-	readonly command: string;
-	readonly args: readonly string[];
+export interface ChildAgentSession {
+	readonly messages: readonly unknown[];
+	readonly isStreaming: boolean;
+	subscribe(listener: (event: unknown) => void): () => void;
+	prompt(text: string): Promise<void>;
+	abort(): Promise<void>;
+	waitForIdle(): Promise<void>;
+	dispose(): void;
 }
 
-export interface BuildChildArgsOptions {
-	readonly task: string;
-	readonly systemPromptPath?: string;
-	readonly model?: string;
-	readonly thinkingLevel?: ThinkingLevel;
-	readonly profile?: ChildToolProfile;
-	/** Compatibility input for the low-level transport seam. */
-	readonly tools?: readonly string[];
+export interface ChildAgentSessionFactoryInput {
+	readonly cwd: string;
+	readonly model: string;
+	readonly thinkingLevel: ThinkingLevel;
+	readonly tools: readonly BuiltinTool[];
+	readonly systemPrompt: string;
+	readonly signal?: AbortSignal;
 }
+
+export type ChildAgentSessionFactory = (input: ChildAgentSessionFactoryInput) => Promise<ChildAgentSession>;
 
 export interface SWEForgeTaskOptions {
 	/** A discovered canonical role name, never a path. */
@@ -160,12 +144,10 @@ export interface SWEForgeTaskOptions {
 	readonly signal?: AbortSignal;
 }
 
-/** Fixture-only transport controls; deliberately absent from the package API. */
+/** Fixture-only session controls; deliberately absent from the package API. */
 interface InternalSWEForgeTaskOptions extends SWEForgeTaskOptions {
 	readonly discovery?: SWEForgeDiscoveryOptions;
-	readonly piCommand?: string;
-	readonly piCommandArgs?: readonly string[];
-	readonly env?: NodeJS.ProcessEnv;
+	readonly sessionFactory?: ChildAgentSessionFactory;
 }
 
 export interface SWEForgeTaskRuntimeMetadata extends ChildAgentResult {
@@ -176,40 +158,28 @@ export interface SWEForgeTaskRuntimeMetadata extends ChildAgentResult {
 	readonly cwd: string;
 	readonly model?: string;
 	readonly taskId?: string;
-	/** The child process and prompt material have been awaited and removed. */
+	/** The in-memory session and its listeners have been awaited and disposed. */
 	readonly cleanup: "complete";
 }
 
 export interface SWEForgeTaskResult {
 	/** The final canonical worker result or review, not a transcript. */
 	readonly output: string;
-	/** Runtime/process evidence is deliberately separate from canonical output. */
+	/** Runtime evidence is deliberately separate from canonical output. */
 	readonly runtime: SWEForgeTaskRuntimeMetadata;
 	readonly validation: CanonicalOutputValidation | undefined;
 }
 
-interface ChildEvent extends JsonObject {
-	readonly type?: unknown;
-}
-
-interface ChildProcessOutcome {
-	readonly exitCode: number | null;
-	readonly spawnError?: Error;
-}
-
 interface ChildState {
 	assistantMessage?: JsonObject;
-	text: string;
-	canonicalTexts: string[];
-	stopReason?: string;
-	errorMessage?: string;
+	lastAssistantMessage?: JsonObject;
 	agentStartedAt?: number;
-	agentEndedAt?: number;
+	agentSettledAt?: number;
 	turnCount: number;
 	usage?: ChildAgentUsageDiagnostics;
-	agentEnded: boolean;
+	stopReason?: string;
+	errorMessage?: string;
 	outputTruncated: boolean;
-	eventStreamError?: string;
 }
 
 function isRecord(value: unknown): value is JsonObject {
@@ -257,20 +227,8 @@ function usageDiagnostics(value: unknown): ChildAgentUsageDiagnostics | undefine
 }
 
 function boundedUtf8(value: string, maxBytes: number): { readonly value: string; readonly truncated: boolean } {
-	const bytes = Buffer.from(value, "utf8");
-	if (bytes.byteLength <= maxBytes) return { value, truncated: false };
-
+	if (Buffer.byteLength(value, "utf8") <= maxBytes) return { value, truncated: false };
 	return { value: "", truncated: true };
-}
-
-function appendBounded(current: string, chunk: string, maxBytes: number, marker: string): string {
-	if (current.endsWith(marker)) return current;
-	const bytes = Buffer.concat([Buffer.from(current, "utf8"), Buffer.from(chunk, "utf8")]);
-	if (bytes.byteLength <= maxBytes) return bytes.toString("utf8");
-
-	let end = maxBytes;
-	while (end > 0 && (bytes[end] & 0xc0) === 0x80) end--;
-	return `${bytes.subarray(0, end).toString("utf8")}\n${marker}`;
 }
 
 function isChildTool(value: string): value is BuiltinTool {
@@ -303,9 +261,16 @@ function validateModelIdentifier(model: unknown): asserts model is string {
 			`Pi child model must be a non-empty provider/model identifier: ${JSON.stringify(model)}`,
 		);
 	}
+	const separator = model.indexOf("/");
+	if (separator <= 0 || separator === model.length - 1) {
+		throw new SWEForgeRuntimeError(
+			"INVALID_MODEL",
+			`Pi child model must use the provider/model form: ${JSON.stringify(model)}`,
+		);
+	}
 }
 
-function validateThinkingLevel(level: unknown): asserts level is ThinkingLevel {
+function validateThinkingLevel(level: unknown): asserts level is ThinkingLevel | undefined {
 	if (level === undefined) return;
 	if (typeof level !== "string" || !(THINKING_LEVELS as readonly string[]).includes(level)) {
 		throw new SWEForgeRuntimeError(
@@ -332,7 +297,7 @@ function sameToolSet(left: readonly BuiltinTool[], right: readonly BuiltinTool[]
 	return left.every((tool) => rightSet.has(tool));
 }
 
-function resolveTools(options: BuildChildArgsOptions): BuiltinTool[] {
+function resolveTools(options: { readonly profile?: ChildToolProfile; readonly tools?: readonly string[] }): BuiltinTool[] {
 	if (options.profile !== undefined) {
 		const profileTools = [...getToolsForProfile(options.profile)];
 		if (options.tools !== undefined) {
@@ -366,221 +331,6 @@ function resolveTools(options: BuildChildArgsOptions): BuiltinTool[] {
 	);
 }
 
-/**
- * Build the one-shot CLI arguments used for every child.
- *
- * Resource discovery is intentionally disabled here. SWE Forge supplies the
- * child contract explicitly rather than asking a child to discover workflow
- * roles or to load the adapter recursively.
- *
- * @internal The package entry point deliberately does not expose this generic
- * transport helper.
- */
-export function buildChildArgs(options: BuildChildArgsOptions): string[] {
-	const tools = resolveTools(options);
-	if (options.model !== undefined) validateModelIdentifier(options.model);
-	validateThinkingLevel(options.thinkingLevel);
-	const args = [
-		"--mode",
-		"json",
-		"--print",
-		"--no-session",
-		"--no-extensions",
-		"--no-skills",
-		"--no-prompt-templates",
-		"--no-themes",
-		"--no-context-files",
-		"--no-approve",
-		"--exclude-tools",
-		DELEGATION_TOOL_NAMES.join(","),
-	];
-
-	if (options.model) args.push("--model", options.model);
-	if (options.thinkingLevel) args.push("--thinking", options.thinkingLevel);
-	if (tools.length > 0) args.push("--tools", tools.join(","));
-	else args.push("--no-tools");
-	if (options.systemPromptPath) args.push("--append-system-prompt", options.systemPromptPath);
-
-	// Prefixing the task keeps a task beginning with '-' from being parsed as a flag.
-	args.push(`Task: ${options.task}`);
-	return args;
-}
-
-/**
- * Resolve the Pi process without depending on a globally installed package
- * when the caller is itself running from Pi's CLI entry point.
- */
-export function resolvePiInvocation(): ChildInvocation {
-	const currentScript = process.argv[1];
-	const isPiProcess = process.env.PI_CODING_AGENT === "true";
-	const isBunVirtualScript = currentScript?.startsWith("/$bunfs/root/");
-	const resolvedScript = currentScript === undefined ? undefined : resolve(currentScript);
-	if (isPiProcess && resolvedScript && !isBunVirtualScript && existsSync(resolvedScript)) {
-		return { command: process.execPath, args: [resolvedScript] };
-	}
-
-	return { command: "pi", args: [] };
-}
-
-function consumeJsonLines(
-	stream: NodeJS.ReadableStream | null | undefined,
-	onLine: (line: string) => void,
-	onInvalid: (reason: string) => void,
-): void {
-	if (!stream) {
-		onInvalid("stdout was not available");
-		return;
-	}
-
-	const decoder = new StringDecoder("utf8");
-	let buffer = "";
-	let droppingOversizedLine = false;
-	const deliverLine = (line: string) => {
-		if (line.includes("\uFFFD")) {
-			onInvalid("stdout contained invalid UTF-8 event data");
-			return;
-		}
-		onLine(line);
-	};
-	const consumeDecoded = (decoded: string) => {
-		let remaining = decoded;
-		while (remaining.length > 0) {
-			if (droppingOversizedLine) {
-				const newline = remaining.indexOf("\n");
-				if (newline === -1) return;
-				remaining = remaining.slice(newline + 1);
-				droppingOversizedLine = false;
-			}
-
-			buffer += remaining;
-			while (true) {
-				const newline = buffer.indexOf("\n");
-				if (newline === -1) break;
-				let line = buffer.slice(0, newline);
-				buffer = buffer.slice(newline + 1);
-				if (line.endsWith("\r")) line = line.slice(0, -1);
-				if (Buffer.byteLength(line, "utf8") > MAX_EVENT_LINE_BYTES) {
-					onInvalid(`stdout event line exceeds ${MAX_EVENT_LINE_BYTES} bytes`);
-				} else {
-					deliverLine(line);
-				}
-			}
-
-			if (Buffer.byteLength(buffer, "utf8") > MAX_EVENT_LINE_BYTES) {
-				onInvalid(`stdout event line exceeds ${MAX_EVENT_LINE_BYTES} bytes`);
-				buffer = "";
-				droppingOversizedLine = true;
-				return;
-			}
-			remaining = "";
-		}
-	};
-
-	stream.on("data", (chunk: Buffer | string) => {
-		consumeDecoded(decoder.write(typeof chunk === "string" ? Buffer.from(chunk) : chunk));
-	});
-	stream.on("error", (error) => {
-		onInvalid(`stdout stream error: ${error instanceof Error ? error.message : String(error)}`);
-	});
-	stream.on("end", () => {
-		consumeDecoded(decoder.end());
-		if (droppingOversizedLine) return;
-		if (buffer.length > 0) {
-			if (Buffer.byteLength(buffer, "utf8") > MAX_EVENT_LINE_BYTES) {
-				onInvalid(`stdout event line exceeds ${MAX_EVENT_LINE_BYTES} bytes`);
-				return;
-			}
-			deliverLine(buffer.endsWith("\r") ? buffer.slice(0, -1) : buffer);
-		}
-	});
-}
-
-function terminateProcess(child: ChildProcess): () => void {
-	let forceTimer: NodeJS.Timeout | undefined;
-	const pid = child.pid;
-
-	const sendSignal = (signal: NodeJS.Signals) => {
-		if (process.platform !== "win32" && pid) {
-			try {
-				// The child is detached on POSIX, so its process group includes Pi's
-				// shell descendants as well as the Pi process itself.
-				process.kill(-pid, signal);
-				return;
-			} catch {
-				// Fall through to the direct child operation if the group is gone.
-			}
-		}
-		try {
-			child.kill(signal);
-		} catch {
-			// The process has already exited.
-		}
-		if (process.platform === "win32" && pid) {
-			// Windows has no POSIX process-group equivalent. taskkill is the
-			// supported best-effort tree termination path for Pi-launched children.
-			const treeKill = spawn("taskkill", ["/pid", String(pid), "/t", "/f"], {
-				stdio: "ignore",
-				windowsHide: true,
-			});
-			treeKill.once("error", () => {
-				// The direct child may already have exited or taskkill may be absent.
-			});
-		}
-	};
-
-	sendSignal("SIGTERM");
-	forceTimer = setTimeout(() => sendSignal("SIGKILL"), 5_000);
-	forceTimer.unref?.();
-
-	return () => {
-		if (forceTimer) clearTimeout(forceTimer);
-	};
-}
-
-function waitForProcess(child: ChildProcess): Promise<ChildProcessOutcome> {
-	return new Promise((resolve) => {
-		let settled = false;
-		let spawnError: Error | undefined;
-		const finish = (outcome: ChildProcessOutcome) => {
-			if (settled) return;
-			settled = true;
-			resolve(outcome);
-		};
-
-		child.once("error", (error) => {
-			spawnError = error;
-			finish({ exitCode: null, spawnError });
-		});
-		child.once("close", (code) => finish({ exitCode: code, spawnError }));
-	});
-}
-
-function recordCanonicalCandidate(text: string, state: ChildState): void {
-	if (
-		!/^\s*status\s*:/imu.test(text) ||
-		!/(^|\n)\s*(?:summary|validation|review_focus|findings)\s*:/imu.test(text)
-	) {
-		return;
-	}
-	if (!state.canonicalTexts.includes(text)) state.canonicalTexts.push(text);
-	if (state.canonicalTexts.length > 1) {
-		state.eventStreamError ??= "stdout contained conflicting canonical assistant results";
-	}
-}
-
-function applyAssistantMessage(message: JsonObject, state: ChildState): void {
-	if (message.role !== "assistant") return;
-
-	state.assistantMessage = message;
-	const bounded = boundedUtf8(textFromMessage(message), MAX_WORKER_RESULT_BYTES);
-	state.text = bounded.value;
-	state.outputTruncated ||= bounded.truncated;
-	state.usage = usageDiagnostics(message.usage);
-	state.stopReason = asNonEmptyString(message.stopReason);
-	state.errorMessage = asNonEmptyString(message.errorMessage);
-	if (!bounded.truncated) recordCanonicalCandidate(bounded.value, state);
-}
-
 function textFromMessage(message: JsonObject): string {
 	const content = message.content;
 	if (typeof content === "string") return content;
@@ -593,63 +343,59 @@ function textFromMessage(message: JsonObject): string {
 		.join("");
 }
 
-function processChildEvent(line: string, state: ChildState): void {
-	if (!line.trim()) return;
+function assistantMessage(value: unknown): JsonObject | undefined {
+	return isRecord(value) && value.role === "assistant" ? value : undefined;
+}
 
-	let parsed: unknown;
-	try {
-		parsed = JSON.parse(line);
-	} catch {
-		state.eventStreamError ??= "stdout contained a non-JSON event line";
-		return;
+function lastAssistantMessage(values: readonly unknown[]): JsonObject | undefined {
+	for (let index = values.length - 1; index >= 0; index -= 1) {
+		const message = assistantMessage(values[index]);
+		if (message) return message;
 	}
-	if (!isRecord(parsed)) {
-		state.eventStreamError ??= "stdout contained a JSON value that was not an event object";
-		return;
-	}
+	return undefined;
+}
 
-	const event = parsed as ChildEvent;
-	if (typeof event.type !== "string") {
-		state.eventStreamError ??= "stdout contained an event without a type";
-		return;
-	}
-	if (event.type === "agent_start") {
-		state.agentStartedAt ??= performance.now();
-		return;
-	}
-	if (event.type === "turn_start") {
-		state.turnCount += 1;
-		return;
-	}
-	if (event.type === "message_end") {
-		if (!isRecord(event.message)) {
-			state.eventStreamError ??= "message_end did not contain a message object";
+function applyFinalAssistant(message: JsonObject, state: ChildState): void {
+	state.assistantMessage = message;
+	state.lastAssistantMessage = message;
+	state.usage = usageDiagnostics(message.usage);
+	state.stopReason = asNonEmptyString(message.stopReason);
+	state.errorMessage = asNonEmptyString(message.errorMessage);
+}
+
+function processSessionEvent(eventValue: unknown, state: ChildState): void {
+	if (!isRecord(eventValue) || typeof eventValue.type !== "string") return;
+
+	switch (eventValue.type) {
+		case "agent_start":
+			state.agentStartedAt ??= performance.now();
+			return;
+		case "turn_start":
+			state.turnCount += 1;
+			return;
+		case "message_end": {
+			const message = assistantMessage(eventValue.message);
+			if (message) state.lastAssistantMessage = message;
 			return;
 		}
-		applyAssistantMessage(event.message, state);
-		return;
-	}
-	if (event.type === "agent_end") {
-		state.agentEndedAt ??= performance.now();
-		state.agentEnded = true;
-		if (event.messages !== undefined && !Array.isArray(event.messages)) {
-			state.eventStreamError ??= "agent_end.messages was not an array";
+		case "agent_end": {
+			const messages = Array.isArray(eventValue.messages) ? eventValue.messages : [];
+			const finalMessage = lastAssistantMessage(messages);
+			if (finalMessage) applyFinalAssistant(finalMessage, state);
 			return;
 		}
-		if (Array.isArray(event.messages)) {
-			for (const message of event.messages) {
-				if (isRecord(message)) applyAssistantMessage(message, state);
-			}
-		}
+		case "agent_settled":
+			state.agentSettledAt ??= performance.now();
+			return;
+		default:
+			return;
 	}
 }
 
-function failedResult(errorMessage: string, stderr = ""): ChildAgentResult {
+function failedResult(errorMessage: string): ChildAgentResult {
 	return {
 		status: "failed",
-		exitCode: null,
 		text: "",
-		stderr,
 		errorMessage,
 	};
 }
@@ -669,19 +415,23 @@ function withDiagnostics(
 
 function childDiagnostics(
 	state: ChildState,
-	spawnStartedAt: number | undefined,
-	compatibilityCheckDurationMs: number | undefined,
+	initializationStartedAt: number | undefined,
+	sessionStartedAt: number | undefined,
+	finishedAt: number | undefined,
 ): Partial<ChildAgentRuntimeDiagnostics> {
-	const diagnostics: MutableChildAgentRuntimeDiagnostics = {};
-	if (compatibilityCheckDurationMs !== undefined) diagnostics.compatibilityCheckDurationMs = compatibilityCheckDurationMs;
-	if (spawnStartedAt !== undefined && state.agentStartedAt !== undefined) {
-		diagnostics.childStartupDurationMs = elapsedMilliseconds(spawnStartedAt, state.agentStartedAt);
+	const diagnostics: ChildAgentRuntimeDiagnostics = {};
+	if (initializationStartedAt !== undefined && sessionStartedAt !== undefined) {
+		Object.assign(diagnostics, {
+			sessionInitializationDurationMs: elapsedMilliseconds(initializationStartedAt, sessionStartedAt),
+		});
 	}
-	if (state.agentStartedAt !== undefined && state.agentEndedAt !== undefined) {
-		diagnostics.agentExecutionDurationMs = elapsedMilliseconds(state.agentStartedAt, state.agentEndedAt);
+	if (state.agentStartedAt !== undefined && finishedAt !== undefined) {
+		Object.assign(diagnostics, {
+			agentExecutionDurationMs: elapsedMilliseconds(state.agentStartedAt, finishedAt),
+		});
 	}
-	if (state.usage !== undefined) diagnostics.usage = state.usage;
-	if (state.turnCount > 0) diagnostics.turns = state.turnCount;
+	if (state.usage !== undefined) Object.assign(diagnostics, { usage: state.usage });
+	if (state.turnCount > 0) Object.assign(diagnostics, { turns: state.turnCount });
 	return diagnostics;
 }
 
@@ -721,239 +471,97 @@ async function canonicalizeCwd(input: string | undefined): Promise<string> {
 	}
 }
 
-const PI_VERSION_PATTERN = /(?:^|\s)(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\s|$)/u;
-
-/** Check the Pi CLI version against the documented public CLI boundary. */
-export function isSupportedPiVersion(version: string): boolean {
-	const match = PI_VERSION_PATTERN.exec(version.trim());
-	if (!match) return false;
-	return match[4] === undefined && Number(match[1]) === 0 && Number(match[2]) === 84 && Number(match[3]) >= 1;
-}
-
-interface PiProbeResult {
-	readonly version?: string;
-	readonly error?: string;
-	readonly aborted: boolean;
-}
-
-interface PiCompatibilityVerification {
-	readonly result: PiProbeResult;
-	readonly performed: boolean;
-	readonly durationMs?: number;
-}
-
-/** Successful and in-flight checks live only for this host process. */
-interface PiCompatibilityCacheEntry {
-	readonly key: string;
-	readonly promise: Promise<PiProbeResult>;
-	readonly controller: AbortController;
-	waiters: number;
-	finished: boolean;
-}
-
-const piCompatibilityCache = new Map<string, PiCompatibilityCacheEntry>();
-
-function piCompatibilityCacheKey(
-	invocation: ChildInvocation,
-	cwd: string,
-	env: NodeJS.ProcessEnv | undefined,
-): string {
-	const inheritedEnvironmentKeys = ["PATH", "PATHEXT", "NODE_OPTIONS", "PI_CODING_AGENT_DIR"];
-	const mergedEnvironment = { ...process.env, ...env };
-	const keys = new Set([...inheritedEnvironmentKeys, ...Object.keys(env ?? {})]);
-	const environment = [...keys]
-		.sort()
-		.map((key) => [key, mergedEnvironment[key] ?? null]);
-	const commandIdentity = /[\\/]/u.test(invocation.command) ? resolve(cwd, invocation.command) : invocation.command;
-	const identity = JSON.stringify({ command: commandIdentity, args: invocation.args, environment });
-	return createHash("sha256").update(identity).digest("hex");
-}
-
-async function waitForPiProbe(entry: PiCompatibilityCacheEntry, signal: AbortSignal | undefined): Promise<PiProbeResult> {
-	if (signal?.aborted) return { aborted: true };
-	entry.waiters += 1;
-
-	let aborted = false;
-	let removeAbort: (() => void) | undefined;
-	let resolveAbort!: (result: PiProbeResult) => void;
-	const abortResult = new Promise<PiProbeResult>((resolveAbortResult) => {
-		resolveAbort = resolveAbortResult;
-	});
-	const onAbort = () => {
-		if (aborted) return;
-		aborted = true;
-		entry.waiters -= 1;
-		if (!entry.finished && entry.waiters === 0 && piCompatibilityCache.get(entry.key) === entry) {
-			entry.controller.abort();
-		}
-		resolveAbort({ aborted: true });
-	};
-	if (signal) {
-		signal.addEventListener("abort", onAbort, { once: true });
-		removeAbort = () => signal.removeEventListener("abort", onAbort);
-		if (signal.aborted) onAbort();
-	}
-
-	try {
-		return await (signal ? Promise.race([entry.promise, abortResult]) : entry.promise);
-	} finally {
-		removeAbort?.();
-		if (!aborted) entry.waiters -= 1;
-	}
-}
-
-async function verifyPiVersion(
-	invocation: ChildInvocation,
-	cwd: string,
-	env: NodeJS.ProcessEnv | undefined,
-	signal: AbortSignal | undefined,
-): Promise<PiCompatibilityVerification> {
-	if (signal?.aborted) return { result: { aborted: true }, performed: false };
-
-	const key = piCompatibilityCacheKey(invocation, cwd, env);
-	let entry = piCompatibilityCache.get(key);
-	let performed = false;
-	let startedAt: number | undefined;
-	if (!entry) {
-		performed = true;
-		startedAt = performance.now();
-		const controller = new AbortController();
-		let pending!: Promise<PiProbeResult>;
-		pending = probePiVersion(invocation, cwd, env, controller.signal).then(
-			(result) => {
-				entry!.finished = true;
-				if (!(result.version !== undefined && !result.error && !result.aborted) && piCompatibilityCache.get(key) === entry) {
-					piCompatibilityCache.delete(key);
-				}
-				return result;
-			},
-			(error: unknown) => {
-				entry!.finished = true;
-				if (piCompatibilityCache.get(key) === entry) piCompatibilityCache.delete(key);
-				throw error;
-			},
-		);
-		entry = { key, promise: pending, controller, waiters: 0, finished: false };
-		piCompatibilityCache.set(key, entry);
-	}
-
-	const result = await waitForPiProbe(entry, signal);
+function createMinimalResourceLoader(systemPrompt: string): ResourceLoader {
+	const extensions = { extensions: [], errors: [], runtime: createExtensionRuntime() };
 	return {
-		result,
-		performed,
-		...(startedAt === undefined ? {} : { durationMs: elapsedMilliseconds(startedAt) }),
+		getExtensions: () => extensions,
+		getSkills: () => ({ skills: [], diagnostics: [] }),
+		getPrompts: () => ({ prompts: [], diagnostics: [] }),
+		getThemes: () => ({ themes: [], diagnostics: [] }),
+		getAgentsFiles: () => ({ agentsFiles: [] }),
+		getSystemPrompt: () => systemPrompt,
+		getSystemPromptSource: () => undefined,
+		getAppendSystemPrompt: () => [],
+		getAppendSystemPromptSources: () => [],
+		extendResources: () => undefined,
+		reload: async () => undefined,
 	};
 }
 
-async function probePiVersion(
-	invocation: ChildInvocation,
-	cwd: string,
-	env: NodeJS.ProcessEnv | undefined,
-	signal: AbortSignal | undefined,
-): Promise<PiProbeResult> {
-	if (signal?.aborted) return { aborted: true };
-	return new Promise((resolveProbe) => {
-		let settled = false;
-		let stdout = "";
-		let stderr = "";
-		let timeout: NodeJS.Timeout | undefined;
-		let removeAbort: (() => void) | undefined;
-		let terminationCleanup: (() => void) | undefined;
-		let processForProbe: ChildProcess | undefined;
-		let timedOut = false;
-		const finish = (result: PiProbeResult) => {
-			if (settled) return;
-			settled = true;
-			if (timeout) clearTimeout(timeout);
-			terminationCleanup?.();
-			removeAbort?.();
-			resolveProbe(result);
-		};
-
-		try {
-			processForProbe = spawn(invocation.command, [...invocation.args, "--version"], {
-				cwd,
-				env: { ...process.env, ...env },
-				shell: false,
-				stdio: ["ignore", "pipe", "pipe"],
-				detached: process.platform !== "win32",
-				windowsHide: true,
-			});
-		} catch (error) {
-			finish({ aborted: false, error: error instanceof Error ? error.message : String(error) });
-			return;
-		}
-
-		processForProbe.stdout?.on("data", (chunk: Buffer | string) => {
-			stdout = appendBounded(stdout, typeof chunk === "string" ? chunk : chunk.toString("utf8"), 8 * 1024, "[stdout truncated]");
-		});
-		processForProbe.stderr?.on("data", (chunk: Buffer | string) => {
-			stderr = appendBounded(stderr, typeof chunk === "string" ? chunk : chunk.toString("utf8"), 8 * 1024, "[stderr truncated]");
-		});
-		processForProbe.once("error", (error) => finish({ aborted: false, error: error.message }));
-		processForProbe.once("close", (code) => {
-			if (signal?.aborted) {
-				finish({ aborted: true });
-				return;
-			}
-			if (timedOut) {
-				finish({ aborted: false, error: "Pi compatibility probe timed out after 5000ms." });
-				return;
-			}
-			if (code !== 0) {
-				finish({
-					aborted: false,
-					error: `Pi compatibility probe exited with code ${String(code)}${stderr ? `: ${stderr.trim()}` : ""}`,
-				});
-				return;
-			}
-			const match = PI_VERSION_PATTERN.exec(stdout.trim());
-			if (!match) {
-				finish({ aborted: false, error: `Pi compatibility probe returned no semantic version: ${stdout.trim() || "(empty)"}` });
-				return;
-			}
-			const version = match[0].trim();
-			if (!isSupportedPiVersion(version)) {
-				finish({
-					aborted: false,
-					error: `Unsupported Pi version ${version}; supported compatibility range is ${PI_COMPATIBILITY_POLICY.range}.`,
-				});
-				return;
-			}
-			finish({ aborted: false, version });
-		});
-
-		const abort = () => {
-			if (processForProbe && !settled) {
-				terminationCleanup?.();
-				terminationCleanup = terminateProcess(processForProbe);
-			}
-		};
-		if (signal) {
-			signal.addEventListener("abort", abort, { once: true });
-			removeAbort = () => signal.removeEventListener("abort", abort);
-			if (signal.aborted) abort();
-		}
-		timeout = setTimeout(() => {
-			if (!settled && processForProbe) {
-				timedOut = true;
-				terminationCleanup?.();
-				terminationCleanup = terminateProcess(processForProbe);
-			}
-		}, 5_000);
-		timeout.unref?.();
-	});
+function splitModelIdentifier(modelIdentifier: string): { readonly provider: string; readonly model: string } {
+	const separator = modelIdentifier.indexOf("/");
+	return {
+		provider: modelIdentifier.slice(0, separator),
+		model: modelIdentifier.slice(separator + 1),
+	};
 }
 
-/** Run one isolated Pi conversation and return only its final structured data. */
+function wrapAgentSession(session: AgentSession): ChildAgentSession {
+	return {
+		get messages() {
+			return session.messages;
+		},
+		get isStreaming() {
+			return session.isStreaming;
+		},
+		subscribe(listener) {
+			return session.subscribe(listener as Parameters<AgentSession["subscribe"]>[0]);
+		},
+		prompt(text) {
+			return session.prompt(text, { expandPromptTemplates: false, source: "extension" });
+		},
+		abort: () => session.abort(),
+		waitForIdle: () => session.waitForIdle(),
+		dispose: () => session.dispose(),
+	};
+}
+
+async function createDefaultChildSession(input: ChildAgentSessionFactoryInput): Promise<ChildAgentSession> {
+	validateModelIdentifier(input.model);
+	const { provider, model: modelId } = splitModelIdentifier(input.model);
+	const modelRuntime = await ModelRuntime.create({
+		allowModelNetwork: false,
+		refreshOnCreate: false,
+		signal: input.signal,
+	});
+	const model = modelRuntime.getModel(provider, modelId);
+	if (!model) {
+		throw new SWEForgeRuntimeError(
+			"INVALID_MODEL",
+			`Pi child model is not available in the SDK catalog: ${input.model}`,
+			{ details: { provider, model: modelId } },
+		);
+	}
+
+	const settingsManager = SettingsManager.inMemory({
+		compaction: { enabled: false },
+		retry: { enabled: false, maxRetries: 0 },
+		defaultThinkingLevel: input.thinkingLevel,
+		defaultTools: [...input.tools],
+	});
+	const { session } = await createAgentSession({
+		cwd: input.cwd,
+		modelRuntime,
+		model,
+		thinkingLevel: input.thinkingLevel,
+		tools: [...input.tools],
+		excludeTools: [...DELEGATION_TOOL_NAMES],
+		resourceLoader: createMinimalResourceLoader(input.systemPrompt),
+		sessionManager: SessionManager.inMemory(input.cwd),
+		settingsManager,
+	});
+	return wrapAgentSession(session);
+}
+
+const defaultSessionFactory: ChildAgentSessionFactory = createDefaultChildSession;
+
+/** Run one fresh in-process Pi AgentSession and return only its final assistant data. */
 async function runPiChildAgent(options: ChildAgentOptions): Promise<ChildAgentResult> {
-	// Validate capability selection before entering the child-error recovery path;
-	// invalid profiles are caller errors, not child process failures.
 	const totalStartedAt = performance.now();
 	const tools = resolveTools(options);
 	if (options.signal?.aborted) {
 		return withDiagnostics(
-			{ status: "aborted", exitCode: null, text: "", stderr: "", errorMessage: "Child aborted before launch" },
+			{ status: "aborted", text: "", errorMessage: "Child aborted before session initialization" },
 			{ totalRuntimeDurationMs: elapsedMilliseconds(totalStartedAt), queueWaitDurationMs: 0 },
 		);
 	}
@@ -980,7 +588,7 @@ async function runPiChildAgent(options: ChildAgentOptions): Promise<ChildAgentRe
 		const queueWaitDurationMs = elapsedMilliseconds(queueStartedAt, operationStartedAt ?? performance.now());
 		if (options.signal?.aborted || isCheckoutAbortError(error)) {
 			return withDiagnostics(
-				{ status: "aborted", exitCode: null, text: "", stderr: "", errorMessage: "Child aborted before launch" },
+				{ status: "aborted", text: "", errorMessage: "Child aborted before session initialization" },
 				{ queueWaitDurationMs, totalRuntimeDurationMs: elapsedMilliseconds(totalStartedAt) },
 			);
 		}
@@ -993,191 +601,148 @@ async function runPiChildAgentUnlocked(
 	tools: readonly BuiltinTool[],
 	cwd: string,
 ): Promise<ChildAgentResult> {
-	const invocation = options.piCommand
-		? { command: options.piCommand, args: options.piCommandArgs ?? [] }
-		: resolvePiInvocation();
-	const state: ChildState = {
-		text: "",
-		canonicalTexts: [],
-		agentEnded: false,
-		outputTruncated: false,
-		turnCount: 0,
-	};
-	let stderr = "";
-	let wasAborted = false;
+	const initializationStartedAt = performance.now();
+	const state: ChildState = { turnCount: 0, outputTruncated: false };
+	const sessionFactory = options.sessionFactory ?? defaultSessionFactory;
+	let session: ChildAgentSession | undefined;
+	let unsubscribe: (() => void) | undefined;
 	let removeAbort: (() => void) | undefined;
-	let clearTermination: (() => void) | undefined;
-	let tempDir: string | undefined;
-	let child: ChildProcess | undefined;
-	let spawnStartedAt: number | undefined;
-	let compatibilityCheckDurationMs: number | undefined;
+	let abortPromise: Promise<void> | undefined;
+	let wasAborted = false;
+	let promptError: unknown;
+	let cleanupError: unknown;
+	let sessionStartedAt: number | undefined;
+	let finalResult: ChildAgentResult;
 
-	let piVersion: string | undefined;
+	const requestAbort = (cancellation: boolean) => {
+		if (cancellation) wasAborted = true;
+		if (!session || abortPromise) return;
+		abortPromise = session.abort().catch((error: unknown) => {
+			cleanupError ??= error;
+		});
+	};
+
 	try {
 		if (options.signal?.aborted) {
-			return { status: "aborted", exitCode: null, text: "", stderr: "", errorMessage: "Child aborted before launch" };
-		}
-
-		const verification = await verifyPiVersion(invocation, cwd, options.env, options.signal);
-		if (verification.performed) compatibilityCheckDurationMs = verification.durationMs;
-		const probe = verification.result;
-		if (probe.aborted) {
 			return withDiagnostics(
-				{ status: "aborted", exitCode: null, text: "", stderr: "", errorMessage: "Child aborted during Pi compatibility probe" },
-				{ compatibilityCheckDurationMs },
+				{ status: "aborted", text: "", errorMessage: "Child aborted before session initialization" },
+				childDiagnostics(state, initializationStartedAt, undefined, undefined),
 			);
 		}
-		if (probe.error) {
+		if (options.model === undefined) {
 			return withDiagnostics(
-				failedResult(`Pi compatibility check failed: ${probe.error}`),
-				{ compatibilityCheckDurationMs },
+				failedResult("SWE Forge child execution requires an explicit provider/model identifier."),
+				childDiagnostics(state, initializationStartedAt, undefined, undefined),
 			);
 		}
-		piVersion = probe.version;
-		if (piVersion === undefined) {
-			return withDiagnostics(
-				failedResult("Pi compatibility check did not return a verified version."),
-				{ compatibilityCheckDurationMs },
-			);
-		}
-
-		let systemPromptPath: string | undefined;
-		if (options.systemPrompt?.trim()) {
-			tempDir = await mkdtemp(join(tmpdir(), "swe-forge-pi-subagent-"));
-			systemPromptPath = join(tempDir, "system-prompt.md");
-			await writeFile(systemPromptPath, options.systemPrompt, { encoding: "utf8", mode: 0o600 });
-		}
-		if (options.signal?.aborted) {
-			return withDiagnostics(
-				{ status: "aborted", exitCode: null, text: "", stderr: "", errorMessage: "Child aborted before launch" },
-				{ compatibilityCheckDurationMs },
-			);
-		}
-
-		const childArgs = buildChildArgs({
-			task: options.task,
-			systemPromptPath,
+		validateModelIdentifier(options.model);
+		const thinkingLevel = options.thinkingLevel ?? "medium";
+		validateThinkingLevel(thinkingLevel);
+		session = await sessionFactory({
+			cwd,
 			model: options.model,
-			thinkingLevel: options.thinkingLevel,
+			thinkingLevel,
 			tools,
+			systemPrompt: options.systemPrompt ?? "",
+			signal: options.signal,
 		});
+		sessionStartedAt = performance.now();
+		unsubscribe = session.subscribe((event) => processSessionEvent(event, state));
 
-		try {
-			spawnStartedAt = performance.now();
-			child = spawn(invocation.command, [...invocation.args, ...childArgs], {
-				cwd,
-				env: { ...process.env, ...options.env },
-				shell: false,
-				stdio: ["ignore", "pipe", "pipe"],
-				// A detached POSIX process group lets cancellation include Pi-launched
-				// shell descendants. Windows uses the direct process fallback below.
-				detached: process.platform !== "win32",
-				windowsHide: true,
-			});
-		} catch (error) {
-			return withDiagnostics(
-				failedResult(error instanceof Error ? error.message : String(error)),
-				childDiagnostics(state, spawnStartedAt, compatibilityCheckDurationMs),
-			);
-		}
-
-		consumeJsonLines(
-			child.stdout,
-			(line) => processChildEvent(line, state),
-			(reason) => {
-				state.eventStreamError ??= reason;
-			},
-		);
-		child.stderr?.on("data", (chunk: Buffer | string) => {
-			stderr = appendBounded(
-				stderr,
-				typeof chunk === "string" ? chunk : chunk.toString("utf8"),
-				MAX_STDERR_BYTES,
-				"[stderr truncated]",
-			);
-		});
-
-		const onAbort = () => {
-			wasAborted = true;
-			clearTermination?.();
-			clearTermination = terminateProcess(child as ChildProcess);
-		};
+		const onAbort = () => requestAbort(true);
 		if (options.signal) {
 			options.signal.addEventListener("abort", onAbort, { once: true });
 			removeAbort = () => options.signal?.removeEventListener("abort", onAbort);
 			if (options.signal.aborted) onAbort();
 		}
-
-		const outcome = await waitForProcess(child);
-		const status: ChildAgentStatus = wasAborted
-			? "aborted"
-			: outcome.spawnError ||
-					outcome.exitCode !== 0 ||
-					state.stopReason === "error" ||
-					state.stopReason === "aborted" ||
-					state.eventStreamError !== undefined ||
-					state.outputTruncated
-				? "failed"
-				: state.agentEnded && state.assistantMessage
-					? "completed"
-					: "failed";
-
-		return withDiagnostics(
-			{
-				status,
-				exitCode: outcome.exitCode,
-				text: state.outputTruncated ? "" : state.text,
-				assistantMessage: state.assistantMessage,
-				stderr,
-				stopReason: state.stopReason,
-				errorMessage:
-					outcome.spawnError?.message ??
-					(state.outputTruncated
-						? `Worker result exceeded the ${MAX_WORKER_RESULT_BYTES}-byte limit; return a concise canonical result.`
-						: state.eventStreamError ??
-							state.errorMessage ??
-							(status === "failed" && (!state.agentEnded || !state.assistantMessage)
-								? "Child exited without a canonical assistant result"
-								: status === "failed"
-									? "Child did not complete successfully"
-									: undefined)),
-				outputTruncated: state.outputTruncated || undefined,
-				eventStreamError: state.eventStreamError,
-				...(piVersion === undefined ? {} : { piVersion }),
-			},
-			childDiagnostics(state, spawnStartedAt, compatibilityCheckDurationMs),
-		);
-	} catch (error) {
-		if (wasAborted || options.signal?.aborted) {
-			return withDiagnostics(
-				{
-					status: "aborted",
-					exitCode: null,
-					text: state.outputTruncated ? "" : state.text,
-					assistantMessage: state.assistantMessage,
-					stderr,
-					errorMessage: "Child aborted",
-					outputTruncated: state.outputTruncated || undefined,
-					eventStreamError: state.eventStreamError,
-					...(piVersion === undefined ? {} : { piVersion }),
-				},
-				childDiagnostics(state, spawnStartedAt, compatibilityCheckDurationMs),
-			);
+		if (options.signal?.aborted) {
+			requestAbort(true);
+		} else {
+			try {
+				await session.prompt(options.task);
+			} catch (error) {
+				promptError = error;
+				requestAbort(options.signal?.aborted === true);
+			}
 		}
-		return withDiagnostics(
-			failedResult(error instanceof Error ? error.message : String(error), stderr),
-			childDiagnostics(state, spawnStartedAt, compatibilityCheckDurationMs),
-		);
+
+		if (abortPromise) await abortPromise;
+		await session.waitForIdle();
+		state.agentSettledAt ??= performance.now();
+		state.assistantMessage ??= lastAssistantMessage(session.messages);
+		state.lastAssistantMessage ??= state.assistantMessage;
+		if (state.assistantMessage) applyFinalAssistant(state.assistantMessage, state);
+
+		const finalAssistant = state.assistantMessage;
+		const stopReason = state.stopReason;
+		const abortedByModel = stopReason === "aborted";
+		const failedByModel = stopReason === "error" || stopReason === "length";
+		const bounded = finalAssistant ? boundedUtf8(textFromMessage(finalAssistant), MAX_WORKER_RESULT_BYTES) : undefined;
+		if (bounded?.truncated) state.outputTruncated = true;
+
+		const status: ChildAgentStatus = wasAborted || options.signal?.aborted || abortedByModel
+			? "aborted"
+			: promptError || failedByModel || state.outputTruncated || !finalAssistant
+				? "failed"
+				: "completed";
+		finalResult = {
+			status,
+			text: status === "completed" && bounded ? bounded.value : "",
+			assistantMessage: finalAssistant,
+			stopReason,
+			errorMessage:
+				status === "aborted"
+					? "Child execution aborted"
+					: state.outputTruncated
+						? `Worker result exceeded the ${MAX_WORKER_RESULT_BYTES}-byte limit; return a concise canonical result.`
+						: (state.errorMessage ??
+							(promptError instanceof Error ? promptError.message : promptError ? String(promptError) : undefined) ??
+							(status === "failed" && !finalAssistant
+								? "AgentSession ended without a canonical assistant result"
+								: status === "failed"
+									? "AgentSession did not complete successfully"
+									: undefined)),
+			outputTruncated: state.outputTruncated || undefined,
+		};
+	} catch (error) {
+		if (options.signal?.aborted || wasAborted) {
+			finalResult = { status: "aborted", text: "", errorMessage: "Child execution aborted" };
+		} else {
+			finalResult = failedResult(error instanceof Error ? error.message : String(error));
+		}
 	} finally {
 		removeAbort?.();
-		clearTermination?.();
-		if (tempDir) await rm(tempDir, { recursive: true, force: true });
+		if (session) {
+			if (session.isStreaming) requestAbort(false);
+			try {
+				if (abortPromise) await abortPromise;
+				await session.waitForIdle();
+			} catch (error) {
+				cleanupError ??= error;
+			}
+			try {
+				session.dispose();
+			} catch (error) {
+				cleanupError ??= error;
+			}
+		}
+		unsubscribe?.();
 	}
+
+	if (cleanupError && finalResult.status === "completed") {
+		finalResult = failedResult(
+			`AgentSession cleanup failed: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`,
+		);
+	}
+	return withDiagnostics(
+		finalResult,
+		childDiagnostics(state, initializationStartedAt, sessionStartedAt, state.agentSettledAt ?? performance.now()),
+	);
 }
 
 /**
- * Internal compatibility entry point for fixture-backed transport tests and the
- * canonical single-task runtime. It is not re-exported from the package entry.
+ * Internal compatibility entry point for the canonical single-task runtime.
+ * It is not re-exported from the package entry.
  */
 export function runChildAgent(options: ChildAgentOptions): Promise<ChildAgentResult>;
 export function runChildAgent(options: SWEForgeTaskOptions): Promise<SWEForgeTaskResult>;
@@ -1227,14 +792,7 @@ function rethrowWithRuntimeDetails(error: unknown, runtime: SWEForgeTaskRuntimeM
 	throw error;
 }
 
-/**
- * Execute exactly one bounded SWE-Forge task.
- *
- * The role and expected output contract are loaded afresh for every call. The
- * child receives one prompt file and one user message, uses the selected closed
- * tool profile, and has no extensions, skills, templates, themes, context-file
- * discovery, session persistence, or delegation tools.
- */
+/** Execute exactly one bounded SWE-Forge task through a fresh AgentSession. */
 export async function executeSWEForgeTask(options: SWEForgeTaskOptions): Promise<SWEForgeTaskResult> {
 	const internalOptions = options as InternalSWEForgeTaskOptions;
 	getToolsForProfile(internalOptions.profile);
@@ -1270,9 +828,7 @@ export async function executeSWEForgeTask(options: SWEForgeTaskOptions): Promise
 		thinkingLevel: internalOptions.thinkingLevel,
 		profile: internalOptions.profile,
 		signal: internalOptions.signal,
-		piCommand: internalOptions.piCommand,
-		piCommandArgs: internalOptions.piCommandArgs,
-		env: internalOptions.env,
+		sessionFactory: internalOptions.sessionFactory,
 	});
 	const runtime = runtimeMetadata(child, internalOptions, internalOptions.profile, taskId, cwd);
 

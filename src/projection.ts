@@ -55,11 +55,7 @@ export type SWEForgeRuntimeErrorCode =
 	| "MISSING_MODEL"
 	| "INVALID_MODEL"
 	| "INVALID_THINKING_LEVEL"
-	| "INVALID_CWD"
-	| "OUTPUT_TRUNCATED"
-	| "NO_CANONICAL_RESULT"
-	| "EVENT_STREAM_INVALID"
-	| "PI_COMPATIBILITY_UNAVAILABLE";
+	| "INVALID_CWD";
 
 export interface SWEForgeRuntimeErrorOptions {
 	readonly status?: SWEForgeRuntimeErrorStatus;

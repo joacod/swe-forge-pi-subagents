@@ -21,12 +21,12 @@ export const SWE_FORGE_SUBAGENT_PROTOCOL_VERSION = 1 as const;
  * Execution semantics advertised to the SWE-Forge adapter.
  *
  * These values describe context/process separation only. The child still uses
- * the caller's checkout and OS permissions; this is not a filesystem or OS
- * sandbox.
+ * the caller's checkout, host process, and OS permissions; this is not a
+ * filesystem or OS sandbox.
  */
 export const SWE_FORGE_SUBAGENT_ISOLATION = Object.freeze({
 	contextIsolation: true,
-	processIsolation: true,
+	processIsolation: false,
 	filesystemIsolation: false,
 	osSandbox: false,
 } as const);
@@ -37,10 +37,11 @@ export const SWE_FORGE_SUBAGENT_TRUST = Object.freeze({
 	sandbox: false,
 } as const);
 
-/** Pi compatibility metadata; the actual CLI version is checked before a run. */
+/** Pi compatibility metadata for the public in-process AgentSession SDK. */
 export const SWE_FORGE_SUBAGENT_PI = Object.freeze({
 	compatibilityRange: PI_COMPATIBILITY_POLICY.range,
-	versionVerification: "before_execution",
+	runtime: PI_COMPATIBILITY_POLICY.runtime,
+	versionVerification: PI_COMPATIBILITY_POLICY.verification,
 } as const);
 
 const AVAILABLE_PROFILES = Object.freeze(["READ_ONLY", "WRITABLE"] as const);
@@ -152,8 +153,9 @@ function baseCapabilities(packageVersion: string) {
 
 /**
  * Report only observed runtime capabilities. This is a capability probe, not
- * a topology, provider, or workflow decision. Pi CLI compatibility is checked
- * by the task runner immediately before execution, not during this probe.
+ * a topology, provider, or workflow decision. The package imports the public
+ * AgentSession SDK directly; the declared compatibility line is not a CLI
+ * subprocess probe.
  */
 export async function getSWEForgeCapabilities(
 	discovery: SWEForgeDiscoveryOptions = {},
