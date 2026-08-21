@@ -55,11 +55,10 @@ this package.
 
 ## Focused technical spike
 
-The research target covered the Pi package development install
-`@earendil-works/pi-coding-agent` **0.84.1** and the separately installed Pi
-CLI/package **0.84.2**, under
-`/Users/joaquindiaz/.nvm/versions/node/v24.15.0/lib/node_modules/`. The
-adapter's conservative supported line is `>=0.84.1 <0.85.0`.
+The research target covered the Pi package development install and CLI
+`@earendil-works/pi-coding-agent` **0.84.2**, plus minimum-version compatibility
+fixtures for **0.84.1**. The adapter's conservative supported line remains
+`>=0.84.1 <0.85.0`.
 Relevant current sources and documentation inspected include:
 
 - `docs/extensions.md` and `examples/extensions/subagent/index.ts`;
@@ -185,18 +184,24 @@ another public child-agent framework.
 
 The runner resolves the current Pi executable conservatively: when the active
 Pi script is a real file it invokes it with the current Node executable; it
-otherwise falls back to the `pi` command. For a real invocation it probes
-`--version` and fails closed outside the supported Pi line; injected commands
-remain an explicit fixture seam. It uses `spawn` without a shell, canonicalizes
-and validates the selected `cwd`, writes prompt material to a mode-0600
-temporary file, parses bounded UTF-8 JSONL incrementally, terminates the child
-process tree on cancellation, and removes temporary material in a `finally`
-path. The returned result contains a status, exit code, final assistant text,
-final assistant metadata when available, bounded stderr, bounded event-stream
-diagnostics, and stop/error metadata. The task runtime validates the final
-text against the selected canonical result/review contract and returns that
-canonical output separately from the runtime metadata; SWE Forge remains
-responsible for interpreting status, evidence, and workflow outcomes.
+otherwise falls back to the `pi` command. It probes each configured invocation
+with `--version`, caches successful matching checks for the host process, shares
+in-flight probes, and evicts failures so a later valid attempt can retry. It
+fails closed outside the supported Pi line. It uses `spawn` without a shell,
+canonicalizes and validates the selected `cwd`, writes prompt material to a
+mode-0600 temporary file, parses bounded UTF-8 JSONL incrementally, terminates
+the child process tree on cancellation, and removes temporary material in a
+`finally` path. The returned result contains a status, exit code, final
+assistant text, final assistant metadata when available, bounded stderr,
+bounded event-stream diagnostics, optional queue/process/agent/total timing,
+turn count, and final assistant usage. Pi's delta-only `message_update` usage
+is not reconstructed; the final `message_end`/`agent_end` assistant message is
+authoritative. A canonical worker result is limited to 64 KiB and oversized
+output fails closed without exposing a truncated canonical value. The task
+runtime validates the final text against the selected canonical result/review
+contract and returns that canonical output separately from runtime metadata;
+SWE Forge remains responsible for interpreting status, evidence, and workflow
+outcomes.
 
 ## Why it was selected
 
@@ -246,11 +251,11 @@ updating the Pi peer range:
 
 Pi 0.84.1 and 0.84.2 support these assumptions in the tested environment. The
 package uses Pi's `*` peer convention while the runtime remains conservative:
-it probes the real child version and covers argument construction, JSONL
-parsing, result selection, bounded
-output, cwd normalization, cancellation, failures, and cleanup with
-fixture-backed tests. Unsupported or unobservable versions fail clearly rather
-than being treated as compatible.
+it probes the configured child version and covers argument construction, JSONL
+parsing, final usage selection, compatibility caching, result bounds, cwd
+normalization, cancellation, failures, and cleanup with fixture-backed tests.
+Unsupported or unobservable versions fail clearly rather than being treated as
+compatible.
 
 ## Security and isolation semantics
 
@@ -299,9 +304,9 @@ than being treated as compatible.
    documented public surfaces but still versioned with Pi. A future Pi release
    may require an adapter compatibility update.
 4. **Result size:** Pi tool output is truncated, but a long child conversation
-   can still produce large event streams. The adapter bounds stderr and final
-   worker output and keeps only final result data; it does not return transcripts
-   by default.
+   can still produce large event streams. The adapter bounds stderr and event
+   lines, enforces a 64 KiB final worker-result limit, and keeps only final
+   result data; it does not return transcripts by default.
 5. **Resource policy trade-off:** disabling all discovered resources maximizes
    determinism but means the child does not automatically receive repository
    `AGENTS.md` or Pi extension tools. SWE Forge must include any required
