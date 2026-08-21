@@ -37,12 +37,15 @@ export type SWEForgeRuntimeErrorCode =
 	| "CANONICAL_SOURCE_UNAVAILABLE"
 	| "CANONICAL_SOURCE_INVALID"
 	| "CANONICAL_SOURCE_TOO_LARGE"
-	| "EMPTY_TASK_CONTRACT"
-	| "TASK_CONTRACT_TOO_LARGE"
+	| "EMPTY_WORKER_BRIEFING"
+	| "WORKER_BRIEFING_TOO_LARGE"
+	| "MISSING_WORKER_BRIEFING_FIELD"
+	| "UNSUPPORTED_WORKER_BRIEFING_SCHEMA"
+	| "INVALID_WORKER_BRIEFING"
 	| "MISSING_TASK_ID"
 	| "CONFLICTING_TASK_ID"
 	| "INVALID_EXPECTED_TASK_ID"
-	| "INVALID_TASK_ACCESS"
+	| "INVALID_WORKER_BRIEFING_ACCESS"
 	| "ACCESS_CONFLICT"
 	| "EMPTY_OUTPUT"
 	| "INVALID_EXPECTED_OUTPUT_CONTRACT"
@@ -108,8 +111,8 @@ export interface CanonicalContract {
 export interface RuntimePromptInput {
 	/** The canonical role name, not a filesystem path. */
 	readonly role: string;
-	/** Markdown supplied by the caller from the canonical task contract loader. */
-	readonly taskContract: string;
+	/** The root-rendered worker_briefing/v1 projection for this launch. */
+	readonly workerBriefing: string;
 	readonly expectedOutputContract: ExpectedOutputContract;
 	/** Optional discovery seam for tests and development installations. */
 	readonly discovery?: SWEForgeDiscoveryOptions;
@@ -118,11 +121,13 @@ export interface RuntimePromptInput {
 /** The two access levels understood by the child runtime. */
 export type CanonicalWriteAccess = "READ_ONLY" | "WRITABLE";
 
-export interface TaskContractValidation {
+export interface WorkerBriefingValidation {
 	readonly valid: true;
-	readonly taskId?: string;
-	/** Concrete canonical `write_access` metadata, when the task supplies it. */
-	readonly writeAccess?: CanonicalWriteAccess;
+	/** Every worker briefing, including review launches, has a concrete ID. */
+	readonly taskId: string;
+	readonly writeAccess: CanonicalWriteAccess;
+	readonly topology: "SUBAGENTS";
+	readonly writeIsolation: "SHARED";
 }
 
 export interface CanonicalOutputValidation {
@@ -381,24 +386,24 @@ export function loadExpectedOutputContract(
 	return loadCanonicalContract(contractName, options);
 }
 
-function ensureTaskContractString(taskContract: unknown): asserts taskContract is string {
-	if (typeof taskContract !== "string" || taskContract.trim().length === 0) {
+function ensureWorkerBriefingString(workerBriefing: unknown): asserts workerBriefing is string {
+	if (typeof workerBriefing !== "string" || workerBriefing.trim().length === 0) {
 		throw new SWEForgeRuntimeError(
-			"EMPTY_TASK_CONTRACT",
-			"The canonical task contract must be non-empty.",
+			"EMPTY_WORKER_BRIEFING",
+			"The worker briefing must be non-empty.",
 		);
 	}
-	if (Buffer.byteLength(taskContract, "utf8") > MAX_CANONICAL_SOURCE_BYTES) {
+	if (Buffer.byteLength(workerBriefing, "utf8") > MAX_CANONICAL_SOURCE_BYTES) {
 		throw new SWEForgeRuntimeError(
-			"TASK_CONTRACT_TOO_LARGE",
-			`The canonical task contract exceeds the ${MAX_CANONICAL_SOURCE_BYTES}-byte limit.`,
+			"WORKER_BRIEFING_TOO_LARGE",
+			`The worker briefing exceeds the ${MAX_CANONICAL_SOURCE_BYTES}-byte limit.`,
 			{ details: { maxBytes: MAX_CANONICAL_SOURCE_BYTES } },
 		);
 	}
-	if (taskContract.includes("\uFFFD")) {
+	if (workerBriefing.includes("\uFFFD")) {
 		throw new SWEForgeRuntimeError(
 			"CANONICAL_SOURCE_INVALID",
-			"The canonical task contract is not valid UTF-8.",
+			"The worker briefing is not valid UTF-8.",
 		);
 	}
 }
@@ -412,6 +417,14 @@ interface ParsedField {
 	readonly present: boolean;
 	readonly value?: string;
 }
+
+const WORKER_BRIEFING_PATH = ["worker_briefing"] as const;
+const WORKER_BRIEFING_SCHEMA_PATH = ["worker_briefing", "schema"] as const;
+const WORKER_BRIEFING_TASK_ID_PATH = ["worker_briefing", "task_id"] as const;
+const WORKER_BRIEFING_PERMISSIONS_PATH = ["worker_briefing", "permissions"] as const;
+const WORKER_BRIEFING_WRITE_ACCESS_PATH = ["worker_briefing", "permissions", "write_access"] as const;
+const WORKER_BRIEFING_TOPOLOGY_PATH = ["worker_briefing", "permissions", "topology"] as const;
+const WORKER_BRIEFING_WRITE_ISOLATION_PATH = ["worker_briefing", "permissions", "write_isolation"] as const;
 
 function normalizeParsedFieldValue(rawValue: string | undefined): ParsedField {
 	let value = rawValue?.trim() ?? "";
@@ -436,54 +449,167 @@ function parsedField(markdown: string, fieldName: string): ParsedField {
 	return parsedFields(markdown, fieldName)[0] ?? { present: false };
 }
 
+interface ParsedMappingLine {
+	readonly indent: number;
+	readonly key?: string;
+	readonly value: string;
+	readonly sequence: boolean;
+}
+
+interface PathStackEntry {
+	readonly indent: number;
+	readonly segment: string;
+}
+
+function indentationWidth(value: string): number {
+	return value.replace(/\t/gu, "    ").length;
+}
+
+/** Parse only the simple block mappings used by worker_briefing/v1. */
+function parsedMappingLine(line: string): ParsedMappingLine | undefined {
+	const sequenceOnly = /^(?<indent>[ \t]*)-\s*(?:#.*)?$/u.exec(line);
+	if (sequenceOnly?.groups?.indent !== undefined) {
+		return { indent: indentationWidth(sequenceOnly.groups.indent), value: "", sequence: true };
+	}
+
+	const match = /^(?<indent>[ \t]*)(?<sequence>-\s+)?(?<key>[A-Za-z_][A-Za-z0-9_-]*)\s*:\s*(?<value>.*?)\s*$/u.exec(line);
+	if (
+		match?.groups === undefined ||
+		match.groups.indent === undefined ||
+		match.groups.key === undefined ||
+		match.groups.value === undefined
+	) {
+		return undefined;
+	}
+	return {
+		indent: indentationWidth(match.groups.indent),
+		key: match.groups.key,
+		value: match.groups.value,
+		sequence: match.groups.sequence !== undefined,
+	};
+}
+
+function samePath(left: readonly string[], right: readonly string[]): boolean {
+	return left.length === right.length && left.every((segment, index) => segment === right[index]);
+}
+
+/** Read exact scalar paths without attempting to parse general YAML. */
+function parsedPathFields(markdown: string, expectedPath: readonly string[]): ParsedField[] {
+	const fields: ParsedField[] = [];
+	const stack: PathStackEntry[] = [];
+
+	for (const line of markdown.split(/\r?\n/u)) {
+		const parsed = parsedMappingLine(line);
+		if (!parsed) continue;
+
+		while (stack.length > 0 && stack[stack.length - 1].indent >= parsed.indent) stack.pop();
+		if (parsed.key === undefined) {
+			stack.push({ indent: parsed.indent, segment: "[]" });
+			continue;
+		}
+		if (parsed.sequence) stack.push({ indent: parsed.indent, segment: "[]" });
+
+		const path = [...stack.map((entry) => entry.segment), parsed.key];
+		if (samePath(path, expectedPath)) fields.push(normalizeParsedFieldValue(parsed.value));
+		if (parsed.value.trim().length === 0) {
+			stack.push({
+				indent: parsed.indent + 0.5,
+				segment: parsed.key,
+			});
+		}
+	}
+
+	return fields;
+}
+
+function parsedFieldAtPath(markdown: string, path: readonly string[]): ParsedField {
+	return parsedPathFields(markdown, path)[0] ?? { present: false };
+}
+
 function distinctConcreteValues(fields: readonly ParsedField[]): string[] {
 	return [...new Set(fields.flatMap((field) => (field.value === undefined ? [] : [field.value])))];
 }
 
-/** Identify a task identifier without translating the task contract. */
-export function extractTaskIdentifier(markdown: string): string | undefined {
+/** Identify the assigned task without translating the worker briefing. */
+export function extractWorkerBriefingTaskIdentifier(markdown: string): string | undefined {
 	if (typeof markdown !== "string") return undefined;
-	return parsedField(markdown, "TASK_ID").value;
+	return parsedFieldAtPath(markdown, WORKER_BRIEFING_TASK_ID_PATH).value;
 }
 
 function normalizeWriteAccess(value: string): CanonicalWriteAccess | undefined {
 	const normalized = value.trim().toLowerCase().replace(/[\s_]+/gu, "-");
-	if (["read", "read-only", "readonly", "none"].includes(normalized)) return "READ_ONLY";
+	if (["read", "read-only", "readonly"].includes(normalized)) return "READ_ONLY";
 	if (["write", "writable", "read-write", "readwrite", "write-access"].includes(normalized)) {
 		return "WRITABLE";
 	}
 	return undefined;
 }
 
-/**
- * Read the concrete canonical `write_access` metadata without rewriting the
- * supplied contract. Placeholder values are treated as absent so the runtime
- * remains compatible with reduced task contracts that omit this field.
- */
-function extractTaskWriteAccess(markdown: string): CanonicalWriteAccess | undefined {
-	const fields = parsedFields(markdown, "write_access");
-	const accesses: CanonicalWriteAccess[] = [];
-	for (const field of fields) {
-		if (!field.value) continue;
-		const access = normalizeWriteAccess(field.value);
-		if (!access) {
-			throw new SWEForgeRuntimeError(
-				"INVALID_TASK_ACCESS",
-				`The task contract contains unsupported write_access metadata: ${JSON.stringify(field.value)}`,
-				{ details: { writeAccess: field.value } },
-			);
-		}
-		accesses.push(access);
-	}
-	const distinctAccesses = [...new Set(accesses)];
-	if (distinctAccesses.length > 1) {
+function requiredWorkerBriefingMarker(
+	markdown: string,
+	path: readonly string[],
+	fieldName = path.join("."),
+): void {
+	if (!parsedFieldAtPath(markdown, path).present) {
 		throw new SWEForgeRuntimeError(
-			"ACCESS_CONFLICT",
-			`The task contract contains conflicting write_access declarations: ${distinctAccesses.join(", ")}.`,
-			{ details: { declarations: distinctAccesses } },
+			"MISSING_WORKER_BRIEFING_FIELD",
+			`The worker briefing is missing required field ${fieldName}.`,
+			{ details: { field: fieldName } },
 		);
 	}
-	return distinctAccesses[0];
+}
+
+function requiredWorkerBriefingValue(
+	markdown: string,
+	path: readonly string[],
+	fieldName = path[path.length - 1] ?? "field",
+): string {
+	const fields = parsedPathFields(markdown, path);
+	const values = distinctConcreteValues(fields);
+	if (values.length > 1) {
+		throw new SWEForgeRuntimeError(
+			"INVALID_WORKER_BRIEFING",
+			`The worker briefing contains conflicting ${fieldName} declarations: ${values.join(", ")}.`,
+			{ details: { field: fieldName, declarations: values } },
+		);
+	}
+	const value = values[0];
+	if (!value) {
+		throw new SWEForgeRuntimeError(
+			"MISSING_WORKER_BRIEFING_FIELD",
+			`The worker briefing is missing a concrete ${fieldName}.`,
+			{ details: { field: fieldName } },
+		);
+	}
+	return value.trim();
+}
+
+function extractWorkerBriefingWriteAccess(markdown: string): CanonicalWriteAccess {
+	const values = distinctConcreteValues(parsedPathFields(markdown, WORKER_BRIEFING_WRITE_ACCESS_PATH));
+	if (values.length > 1) {
+		throw new SWEForgeRuntimeError(
+			"ACCESS_CONFLICT",
+			`The worker briefing contains conflicting write_access declarations: ${values.join(", ")}.`,
+			{ details: { declarations: values } },
+		);
+	}
+	const value = values[0];
+	if (!value) {
+		throw new SWEForgeRuntimeError(
+			"MISSING_WORKER_BRIEFING_FIELD",
+			"The worker briefing is missing a concrete write_access.",
+			{ details: { field: "write_access" } },
+		);
+	}
+	const access = normalizeWriteAccess(value);
+	if (!access) {
+		throw new SWEForgeRuntimeError(
+			"INVALID_WORKER_BRIEFING_ACCESS",
+			`The worker briefing contains unsupported write_access metadata: ${JSON.stringify(value)}`,
+			{ details: { writeAccess: value } },
+		);
+	}
+	return access;
 }
 
 function ensureExpectedTaskId(taskId: string | undefined): string | undefined {
@@ -497,42 +623,70 @@ function ensureExpectedTaskId(taskId: string | undefined): string | undefined {
 	return taskId.trim();
 }
 
-/** Validate the minimum task-contract properties required by the runtime. */
-export function validateTaskContract(
-	taskContract: string,
-	options: { readonly requireTaskId?: boolean; readonly expectedWriteAccess?: CanonicalWriteAccess } = {},
-): TaskContractValidation {
-	ensureTaskContractString(taskContract);
-	const taskIds = distinctConcreteValues(parsedFields(taskContract, "TASK_ID"));
+/** Validate only the minimum worker_briefing/v1 shape required by this primitive. */
+export function validateWorkerBriefing(
+	workerBriefing: string,
+	options: { readonly expectedWriteAccess?: CanonicalWriteAccess } = {},
+): WorkerBriefingValidation {
+	ensureWorkerBriefingString(workerBriefing);
+	requiredWorkerBriefingMarker(workerBriefing, WORKER_BRIEFING_PATH, "worker_briefing");
+	const schema = requiredWorkerBriefingValue(workerBriefing, WORKER_BRIEFING_SCHEMA_PATH, "schema");
+	if (schema !== "worker-brief/v1") {
+		throw new SWEForgeRuntimeError(
+			"UNSUPPORTED_WORKER_BRIEFING_SCHEMA",
+			`The worker briefing schema must be worker-brief/v1, received ${JSON.stringify(schema)}.`,
+			{ details: { schema } },
+		);
+	}
+	requiredWorkerBriefingMarker(workerBriefing, WORKER_BRIEFING_TASK_ID_PATH, "task_id");
+	requiredWorkerBriefingMarker(workerBriefing, WORKER_BRIEFING_PERMISSIONS_PATH, "permissions");
+	const taskIds = distinctConcreteValues(parsedPathFields(workerBriefing, WORKER_BRIEFING_TASK_ID_PATH));
 	if (taskIds.length > 1) {
 		throw new SWEForgeRuntimeError(
 			"CONFLICTING_TASK_ID",
-			`The task contract contains conflicting TASK_ID declarations: ${taskIds.join(", ")}.`,
+			`The worker briefing contains conflicting task_id declarations: ${taskIds.join(", ")}.`,
 			{ details: { taskIds } },
 		);
 	}
 	const taskId = taskIds[0];
-	if (options.requireTaskId && !taskId) {
+	if (!taskId) {
 		throw new SWEForgeRuntimeError(
 			"MISSING_TASK_ID",
-			"The task contract does not contain an identifiable TASK_ID.",
+			"The worker briefing must contain a concrete task_id.",
 		);
 	}
 
-	const writeAccess = extractTaskWriteAccess(taskContract);
-	if (writeAccess !== undefined && options.expectedWriteAccess !== undefined && writeAccess !== options.expectedWriteAccess) {
+	const writeAccess = extractWorkerBriefingWriteAccess(workerBriefing);
+	if (options.expectedWriteAccess !== undefined && writeAccess !== options.expectedWriteAccess) {
 		throw new SWEForgeRuntimeError(
 			"ACCESS_CONFLICT",
-			`Task contract requires ${writeAccess}; invocation requested ${options.expectedWriteAccess}.`,
-			{ details: { taskWriteAccess: writeAccess, requestedWriteAccess: options.expectedWriteAccess } },
+			`Worker briefing requires ${writeAccess}; invocation requested ${options.expectedWriteAccess}.`,
+			{ details: { briefingWriteAccess: writeAccess, requestedWriteAccess: options.expectedWriteAccess } },
 		);
 	}
 
-	return {
-		valid: true,
-		...(taskId === undefined ? {} : { taskId }),
-		...(writeAccess === undefined ? {} : { writeAccess }),
-	};
+	const topology = requiredWorkerBriefingValue(workerBriefing, WORKER_BRIEFING_TOPOLOGY_PATH, "topology").toUpperCase();
+	if (topology !== "SUBAGENTS") {
+		throw new SWEForgeRuntimeError(
+			"INVALID_WORKER_BRIEFING",
+			`The shared-checkout primitive only accepts topology=SUBAGENTS, received ${JSON.stringify(topology)}.`,
+			{ details: { topology } },
+		);
+	}
+	const writeIsolation = requiredWorkerBriefingValue(
+		workerBriefing,
+		WORKER_BRIEFING_WRITE_ISOLATION_PATH,
+		"write_isolation",
+	).toUpperCase();
+	if (writeIsolation !== "SHARED") {
+		throw new SWEForgeRuntimeError(
+			"INVALID_WORKER_BRIEFING",
+			`The shared-checkout primitive only accepts write_isolation=SHARED, received ${JSON.stringify(writeIsolation)}.`,
+			{ details: { writeIsolation } },
+		);
+	}
+
+	return { valid: true, taskId, writeAccess, topology: "SUBAGENTS", writeIsolation: "SHARED" };
 }
 
 function outputStructureAlternatives(expectedOutputContract: ExpectedOutputContract): readonly (readonly string[])[] {
@@ -651,9 +805,9 @@ export function validateCanonicalOutput(
 	};
 }
 
-/** Compose only the canonical role, task contract, output contract, and guardrail. */
+/** Compose the canonical role, worker briefing, output contract, and guardrail. */
 export async function composeRuntimePrompt(input: RuntimePromptInput): Promise<string> {
-	ensureTaskContractString(input.taskContract);
+	validateWorkerBriefing(input.workerBriefing);
 	if (!isExpectedOutputContract(input.expectedOutputContract)) {
 		throw new SWEForgeRuntimeError(
 			"INVALID_EXPECTED_OUTPUT_CONTRACT",
@@ -669,19 +823,20 @@ export async function composeRuntimePrompt(input: RuntimePromptInput): Promise<s
 		role.markdown,
 		"=== END CANONICAL ROLE ===",
 		"",
-		"=== CANONICAL TASK CONTRACT ===",
-		input.taskContract,
-		"=== END CANONICAL TASK CONTRACT ===",
+		"=== WORKER BRIEFING ===",
+		input.workerBriefing,
+		"=== END WORKER BRIEFING ===",
 		"",
 		`=== EXPECTED CANONICAL ${input.expectedOutputContract.toUpperCase()} CONTRACT ===`,
 		outputContract.markdown,
 		`=== END EXPECTED CANONICAL ${input.expectedOutputContract.toUpperCase()} CONTRACT ===`,
 		"",
 		"Pi runtime guardrail:",
-		"- The task contract is authoritative.",
-		"- Stay inside the allowed scope.",
+		"- The worker briefing is the authoritative root-rendered projection for this launch.",
+		"- Stay inside its scope and permissions.",
+		"- Do not infer or reconstruct omitted root-owned state.",
 		"- Do not perform delivery or integration actions.",
 		"- Do not delegate further.",
-		`- Return the required canonical ${input.expectedOutputContract} contract.`,
+		`- Return only the required canonical ${input.expectedOutputContract} output.`,
 	].join("\n");
 }

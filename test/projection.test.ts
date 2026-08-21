@@ -7,13 +7,13 @@ import {
 	SWEForgeRuntimeError,
 	composeRuntimePrompt,
 	discoverCanonicalRoleNames,
-	extractTaskIdentifier,
+	extractWorkerBriefingTaskIdentifier,
 	loadCanonicalResultContract,
 	loadCanonicalReviewContract,
 	loadCanonicalRole,
 	loadCanonicalTaskContract,
 	validateCanonicalOutput,
-	validateTaskContract,
+	validateWorkerBriefing,
 } from "../src/projection.js";
 import { SWE_FORGE_ROOT_ENV } from "../src/discovery.js";
 import { copyFakeSWEForgeInstallation } from "./fixtures.js";
@@ -22,7 +22,22 @@ const temporaryRoots: string[] = [];
 
 const ROLE_MARKDOWN = "# Implementer\n\nCanonical role content.\n";
 const UPDATED_ROLE_MARKDOWN = "# Implementer\n\nUpdated canonical role content.\n";
-const TASK_CONTRACT = "# Task Contract\n\ntask_id: task-123\nobjective: bounded work\n";
+const CANONICAL_TASK_CONTRACT = "# Task Contract\n\ntask_id: task-123\nobjective: bounded work\n";
+const WORKER_BRIEFING = `worker_briefing:
+  schema: worker-brief/v1
+  task_id: task-123
+  worker:
+    role: implementer
+    mode: delegated_worker
+    depth: 1
+    recursive_delegation: false
+  objective: bounded work
+  permissions:
+    write_access: read-only
+    topology: SUBAGENTS
+    write_isolation: SHARED
+`;
+const WRITABLE_WORKER_BRIEFING = WORKER_BRIEFING.replace("write_access: read-only", "write_access: read-write");
 const RESULT_CONTRACT = "# Result Contract\n\nSTATUS: DONE | BLOCKED | FAILED\nSUMMARY:\nVALIDATION:\n";
 const REVIEW_CONTRACT = "# Review Contract\n\nstatus: PASS | CHANGES_REQUIRED\nreview_focus:\nfindings:\n";
 
@@ -33,7 +48,7 @@ async function createCanonicalRoot(): Promise<string> {
 		writeFile(join(root, ".swe-forge", "agents", "implementer.md"), ROLE_MARKDOWN),
 		writeFile(join(root, ".swe-forge", "agents", "reviewer.md"), "# Reviewer\n"),
 		writeFile(join(root, ".swe-forge", "agents", "notes.txt"), "not a role\n"),
-		writeFile(join(root, ".swe-forge", "contracts", "task.md"), TASK_CONTRACT),
+		writeFile(join(root, ".swe-forge", "contracts", "task.md"), CANONICAL_TASK_CONTRACT),
 		writeFile(join(root, ".swe-forge", "contracts", "result.md"), RESULT_CONTRACT),
 		writeFile(join(root, ".swe-forge", "contracts", "review.md"), REVIEW_CONTRACT),
 	]);
@@ -93,79 +108,156 @@ test("loads the three fixed canonical contracts without translating their markdo
 	const review = await loadCanonicalReviewContract(discovery(root));
 
 	assert.equal(task.name, "task");
-	assert.equal(task.markdown, TASK_CONTRACT);
+	assert.equal(task.markdown, CANONICAL_TASK_CONTRACT);
 	assert.equal(result.name, "result");
 	assert.equal(result.markdown, RESULT_CONTRACT);
 	assert.equal(review.name, "review");
 	assert.equal(review.markdown, REVIEW_CONTRACT);
 });
 
-test("composes only canonical sources and the five runtime guardrails", async () => {
+test("composes the root-rendered worker briefing and concise runtime guardrails", async () => {
 	const root = await createCanonicalRoot();
-	const suppliedTask = "task_id: task-123\nobjective: supplied canonical task\n";
+	const suppliedBriefing = WORKER_BRIEFING.replace("bounded work", "supplied bounded work");
 	const prompt = await composeRuntimePrompt({
 		role: "implementer",
-		taskContract: suppliedTask,
+		workerBriefing: suppliedBriefing,
 		expectedOutputContract: "result",
 		discovery: discovery(root),
 	});
 
 	assert.match(prompt, /=== CANONICAL ROLE ===[\s\S]*Canonical role content\./u);
-	assert.match(prompt, /=== CANONICAL TASK CONTRACT ===[\s\S]*supplied canonical task/u);
+	assert.match(prompt, /=== WORKER BRIEFING ===[\s\S]*supplied bounded work/u);
 	assert.match(prompt, /=== EXPECTED CANONICAL RESULT CONTRACT ===[\s\S]*STATUS: DONE \| BLOCKED \| FAILED/u);
 	for (const guardrail of [
-		"The task contract is authoritative.",
-		"Stay inside the allowed scope.",
+		"The worker briefing is the authoritative root-rendered projection for this launch.",
+		"Stay inside its scope and permissions.",
+		"Do not infer or reconstruct omitted root-owned state.",
 		"Do not perform delivery or integration actions.",
 		"Do not delegate further.",
-		"Return the required canonical result contract.",
+		"Return only the required canonical result output.",
 	]) {
 		assert.match(prompt, new RegExp(guardrail.replace(/[.*+?^${}()|[\\]\\]/g, "\\$&"), "u"));
 	}
-	assert.doesNotMatch(prompt, /create a PR|commit|push|merge/u);
+	assert.doesNotMatch(prompt, /CANONICAL TASK CONTRACT|The task contract is authoritative|create a PR|commit|push|merge/u);
 });
 
-test("composing an empty task contract is an explicit blocked runtime error", async () => {
+test("composing an empty worker briefing is an explicit blocked runtime error", async () => {
 	const root = await createCanonicalRoot();
 	assert.throws(
-		() => validateTaskContract("\n\t"),
+		() => validateWorkerBriefing("\n\t"),
 		(error: unknown) =>
 			error instanceof SWEForgeRuntimeError &&
-				error.code === "EMPTY_TASK_CONTRACT" &&
+				error.code === "EMPTY_WORKER_BRIEFING" &&
 				error.status === "BLOCKED",
 	);
 	await assert.rejects(
 		composeRuntimePrompt({
 			role: "implementer",
-			taskContract: "",
+			workerBriefing: "",
 			expectedOutputContract: "result",
 			discovery: discovery(root),
 		}),
-		(error: unknown) => error instanceof SWEForgeRuntimeError && error.code === "EMPTY_TASK_CONTRACT",
+		(error: unknown) => error instanceof SWEForgeRuntimeError && error.code === "EMPTY_WORKER_BRIEFING",
 	);
 });
 
-test("identifies task IDs only when present and can require them", () => {
-	assert.equal(extractTaskIdentifier(TASK_CONTRACT), "task-123");
-	assert.equal(extractTaskIdentifier("objective: no id\n"), undefined);
-	assert.deepEqual(validateTaskContract(TASK_CONTRACT, { requireTaskId: true }), {
+test("validates worker_briefing/v1 fields, profile access, and task identity", () => {
+	assert.equal(extractWorkerBriefingTaskIdentifier(WORKER_BRIEFING), "task-123");
+	assert.equal(extractWorkerBriefingTaskIdentifier("objective: no id\n"), undefined);
+	assert.deepEqual(validateWorkerBriefing(WORKER_BRIEFING, { expectedWriteAccess: "READ_ONLY" }), {
 		valid: true,
 		taskId: "task-123",
+		writeAccess: "READ_ONLY",
+		topology: "SUBAGENTS",
+		writeIsolation: "SHARED",
 	});
+	assert.equal(validateWorkerBriefing(WRITABLE_WORKER_BRIEFING, { expectedWriteAccess: "WRITABLE" }).writeAccess, "WRITABLE");
 	assert.throws(
-		() => validateTaskContract("objective: no id\n", { requireTaskId: true }),
+		() => validateWorkerBriefing(WORKER_BRIEFING.replace("worker_briefing:\n", "")),
+		(error: unknown) => error instanceof SWEForgeRuntimeError && error.code === "MISSING_WORKER_BRIEFING_FIELD",
+	);
+	assert.throws(
+		() => validateWorkerBriefing(WORKER_BRIEFING.replace("  schema: worker-brief/v1\n", "")),
+		(error: unknown) => error instanceof SWEForgeRuntimeError && error.code === "MISSING_WORKER_BRIEFING_FIELD",
+	);
+	assert.throws(
+		() => validateWorkerBriefing("worker_briefing:\n  schema: worker-brief/v1\n", { expectedWriteAccess: "READ_ONLY" }),
+		(error: unknown) => error instanceof SWEForgeRuntimeError && error.code === "MISSING_WORKER_BRIEFING_FIELD",
+	);
+	assert.throws(
+		() => validateWorkerBriefing(WORKER_BRIEFING.replace("worker-brief/v1", "worker-brief/v2")),
+		(error: unknown) => error instanceof SWEForgeRuntimeError && error.code === "UNSUPPORTED_WORKER_BRIEFING_SCHEMA",
+	);
+	assert.throws(
+		() => validateWorkerBriefing(WORKER_BRIEFING.replace("  task_id: task-123", "  task_id: <assigned task identifier>")),
 		(error: unknown) => error instanceof SWEForgeRuntimeError && error.code === "MISSING_TASK_ID",
 	);
-});
-
-test("rejects conflicting task metadata instead of choosing the first declaration", () => {
 	assert.throws(
-		() => validateTaskContract("TASK_ID: task-123\nwrite_access: read-only\nwrite_access: read-write\n", { requireTaskId: true }),
+		() => validateWorkerBriefing(WORKER_BRIEFING, { expectedWriteAccess: "WRITABLE" }),
 		(error: unknown) => error instanceof SWEForgeRuntimeError && error.code === "ACCESS_CONFLICT",
 	);
 	assert.throws(
-		() => validateTaskContract("TASK_ID: task-123\nTASK_ID: other\n", { requireTaskId: true }),
+		() => validateWorkerBriefing(WORKER_BRIEFING.replace("topology: SUBAGENTS", "topology: SOLO")),
+		(error: unknown) => error instanceof SWEForgeRuntimeError && error.code === "INVALID_WORKER_BRIEFING",
+	);
+	assert.throws(
+		() => validateWorkerBriefing(WORKER_BRIEFING.replace("write_isolation: SHARED", "write_isolation: WORKTREE")),
+		(error: unknown) => error instanceof SWEForgeRuntimeError && error.code === "INVALID_WORKER_BRIEFING",
+	);
+});
+
+test("uses the assigned worker task path instead of completed dependency task IDs", () => {
+	const briefing = `worker_briefing:
+  schema: worker-brief/v1
+  task_id: implementation-B
+  worker:
+    role: reader
+    mode: delegated_worker
+    depth: 1
+    recursive_delegation: false
+  objective: inspect implementation dependencies
+  dependencies:
+    completed:
+      - task_id: discovery-A
+        dependency_digest:
+          relevant_facts:
+            - interface X is canonical
+  permissions:
+    write_access: read-only
+    topology: SUBAGENTS
+    write_isolation: SHARED
+`;
+
+	assert.equal(extractWorkerBriefingTaskIdentifier(briefing), "implementation-B");
+	assert.deepEqual(validateWorkerBriefing(briefing, { expectedWriteAccess: "READ_ONLY" }), {
+		valid: true,
+		taskId: "implementation-B",
+		writeAccess: "READ_ONLY",
+		topology: "SUBAGENTS",
+		writeIsolation: "SHARED",
+	});
+});
+
+test("rejects conflicting worker briefing metadata instead of choosing the first declaration", () => {
+	const conflictingWriteAccess = WORKER_BRIEFING.replace(
+		"    write_isolation: SHARED\n",
+		"    write_isolation: SHARED\n    write_access: read-write\n",
+	);
+	assert.throws(
+		() => validateWorkerBriefing(conflictingWriteAccess),
+		(error: unknown) => error instanceof SWEForgeRuntimeError && error.code === "ACCESS_CONFLICT",
+	);
+	assert.throws(
+		() => validateWorkerBriefing(`${WORKER_BRIEFING}  task_id: other\n`),
 		(error: unknown) => error instanceof SWEForgeRuntimeError && error.code === "CONFLICTING_TASK_ID",
+	);
+});
+
+test("rejects a worker briefing above the bounded input limit", () => {
+	const oversized = WORKER_BRIEFING + "x".repeat(512 * 1024);
+	assert.throws(
+		() => validateWorkerBriefing(oversized),
+		(error: unknown) => error instanceof SWEForgeRuntimeError && error.code === "WORKER_BRIEFING_TOO_LARGE",
 	);
 });
 

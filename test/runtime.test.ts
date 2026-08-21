@@ -19,7 +19,26 @@ import { copyFakeSWEForgeInstallation } from "./fixtures.js";
 const temporaryPaths: string[] = [];
 let fixturePath: string;
 
-const TASK_CONTRACT = "# Task Contract\n\nTASK_ID: task-123\nOBJECTIVE: bounded fixture task\n";
+const CANONICAL_TASK_CONTRACT = "# Task Contract\n\ntask_id: task-123\nobjective: bounded fixture task\n";
+const WORKER_BRIEFING = `worker_briefing:
+  schema: worker-brief/v1
+  task_id: task-123
+  worker:
+    role: reader
+    mode: delegated_worker
+    depth: 1
+    recursive_delegation: false
+  objective: bounded fixture task
+  permissions:
+    write_access: read-only
+    topology: SUBAGENTS
+    write_isolation: SHARED
+`;
+const WRITABLE_WORKER_BRIEFING = WORKER_BRIEFING.replace("write_access: read-only", "write_access: read-write");
+const DEPENDENCY_WORKER_BRIEFING = WORKER_BRIEFING.replace(
+	"  objective: bounded fixture task\n",
+	"  objective: bounded fixture task\n  dependencies:\n    completed:\n      - task_id: discovery-A\n        dependency_digest:\n          relevant_facts:\n            - interface X is canonical\n",
+);
 const RESULT_OUTPUT = "STATUS: DONE\nTASK_ID: task-123\nSUMMARY: fixture complete\nVALIDATION: fixture passed\n";
 const REVIEW_OUTPUT = "STATUS: PASS\nTASK_ID: task-123\nREVIEW_FOCUS: fixture review\nFINDINGS: []\n";
 
@@ -85,7 +104,7 @@ async function createCanonicalRoot(): Promise<string> {
 	await Promise.all([
 		writeFile(join(root, ".swe-forge", "agents", "reader.md"), "# Reader\n\nRead-only canonical role.\n"),
 		writeFile(join(root, ".swe-forge", "agents", "writer.md"), "# Writer\n\nWritable canonical role.\n"),
-		writeFile(join(root, ".swe-forge", "contracts", "task.md"), TASK_CONTRACT),
+		writeFile(join(root, ".swe-forge", "contracts", "task.md"), CANONICAL_TASK_CONTRACT),
 		writeFile(
 			join(root, ".swe-forge", "contracts", "result.md"),
 			"# Result Contract\n\nSTATUS: DONE | BLOCKED | FAILED\nTASK_ID: <task identifier>\nSUMMARY:\nVALIDATION:\n",
@@ -161,7 +180,7 @@ function childOptions(
 ) {
 	return {
 		role: profile === "READ_ONLY" ? "reader" : "writer",
-		taskContract: TASK_CONTRACT,
+		workerBriefing: profile === "READ_ONLY" ? WORKER_BRIEFING : WRITABLE_WORKER_BRIEFING,
 		expectedOutputContract: "result" as const,
 		profile,
 		cwd: project,
@@ -236,10 +255,25 @@ test("runs a read-only role with only the READ_ONLY profile and removes prompt m
 	assert.equal(record.args.includes("--no-approve"), true);
 	assert.deepEqual(optionValue(record.args, "--exclude-tools")?.split(","), ["subagent", "swe_forge_subagent"]);
 	assert.match(record.prompt ?? "", /Read-only canonical role\./u);
-	assert.match(record.prompt ?? "", /TASK_ID: task-123/u);
+	assert.match(record.prompt ?? "", /task_id: task-123/u);
+	assert.match(record.prompt ?? "", /=== WORKER BRIEFING ===[\s\S]*worker_briefing:/u);
+	assert.doesNotMatch(record.prompt ?? "", /CANONICAL TASK CONTRACT|The task contract is authoritative/u);
 	assert.match(record.prompt ?? "", /EXPECTED CANONICAL RESULT CONTRACT/u);
 	assert.ok(record.promptPath);
 	await assert.rejects(access(record.promptPath));
+});
+
+test("uses the assigned task ID through runtime when dependencies have task IDs", async () => {
+	const root = await createCanonicalRoot();
+	const project = await createProject();
+	const recordPathValue = await recordPath();
+	const result = await executeSWEForgeTask({
+		...childOptions(root, project, recordPathValue, "success", "READ_ONLY"),
+		workerBriefing: DEPENDENCY_WORKER_BRIEFING,
+	});
+
+	assert.equal(result.runtime.taskId, "task-123");
+	assert.equal(result.validation?.taskId, "task-123");
 });
 
 test("caches one successful Pi compatibility probe for repeated invocation configuration", async () => {
@@ -443,6 +477,19 @@ test("validates the canonical review contract as a separate expected output", as
 	assert.equal(result.output, REVIEW_OUTPUT);
 	assert.equal(result.validation?.contract, "review");
 	assert.equal(result.validation?.status, "PASS");
+});
+
+test("does not load canonical task.md into the per-launch prompt path", async () => {
+	const root = await createCanonicalRoot();
+	await rm(join(root, ".swe-forge", "contracts", "task.md"));
+	const project = await createProject();
+	const recordPathValue = await recordPath();
+	const result = await executeSWEForgeTask(childOptions(root, project, recordPathValue, "success", "READ_ONLY"));
+
+	assert.equal(result.runtime.status, "completed");
+	const record = await readRecord(recordPathValue);
+	assert.match(record.prompt ?? "", /=== WORKER BRIEFING ===/u);
+	assert.doesNotMatch(record.prompt ?? "", /CANONICAL TASK CONTRACT|Task Contract/u);
 });
 
 test("loads the canonical role and output contract dynamically for each invocation", async () => {

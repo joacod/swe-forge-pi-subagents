@@ -52,7 +52,11 @@ function StringEnum<T extends readonly string[]>(values: T, description: string)
 const SubagentParameters = Type.Object({
 	action: StringEnum(SWE_FORGE_SUBAGENT_ACTIONS, "Exactly one of: capabilities or run"),
 	role: Type.Optional(Type.String({ description: "Discovered canonical SWE-Forge role name" })),
-	taskContract: Type.Optional(Type.String({ description: "Canonical bounded SWE-Forge task contract text" })),
+	workerBriefing: Type.Optional(
+		Type.String({
+			description: "The bounded worker_briefing/v1 projection rendered by the SWE-Forge root for this specific launch",
+		}),
+	),
 	expectedOutputContract: Type.Optional(
 		StringEnum(["result", "review"] as const, "Canonical output contract the child must return"),
 	),
@@ -77,13 +81,21 @@ export interface SWEForgeSubagentExtensionDependencies {
 	readonly getCapabilities?: () => Promise<SWEForgeCapabilities>;
 }
 
-function inputError(code: "INVALID_ROLE_NAME" | "EMPTY_TASK_CONTRACT" | "INVALID_EXPECTED_OUTPUT_CONTRACT" | "INVALID_TOOL_PROFILE", message: string): never {
+function inputError(
+	code:
+		| "INVALID_ROLE_NAME"
+		| "EMPTY_WORKER_BRIEFING"
+		| "INVALID_WORKER_BRIEFING"
+		| "INVALID_EXPECTED_OUTPUT_CONTRACT"
+		| "INVALID_TOOL_PROFILE",
+	message: string,
+): never {
 	throw new SWEForgeRuntimeError(code, message);
 }
 
 function requiredRunInput(params: SubagentParameters): {
 	readonly role: string;
-	readonly taskContract: string;
+	readonly workerBriefing: string;
 	readonly expectedOutputContract: ExpectedOutputContract;
 	readonly profile: ChildToolProfile;
 } {
@@ -91,8 +103,17 @@ function requiredRunInput(params: SubagentParameters): {
 	if (typeof role !== "string" || role.trim().length === 0) {
 		return inputError("INVALID_ROLE_NAME", "run requires a canonical role name.");
 	}
-	if (typeof params.taskContract !== "string" || params.taskContract.trim().length === 0) {
-		return inputError("EMPTY_TASK_CONTRACT", "run requires a non-empty canonical task contract.");
+	if (Object.prototype.hasOwnProperty.call(params, "taskContract")) {
+		return inputError(
+			"INVALID_WORKER_BRIEFING",
+			"taskContract is not accepted; run requires the workerBriefing worker_briefing/v1 projection.",
+		);
+	}
+	if (typeof params.workerBriefing !== "string" || params.workerBriefing.trim().length === 0) {
+		return inputError(
+			"EMPTY_WORKER_BRIEFING",
+			"run requires a non-empty worker_briefing/v1 projection rendered by the SWE-Forge root.",
+		);
 	}
 	if (params.expectedOutputContract !== "result" && params.expectedOutputContract !== "review") {
 		return inputError("INVALID_EXPECTED_OUTPUT_CONTRACT", "run requires expectedOutputContract=result or review.");
@@ -103,7 +124,7 @@ function requiredRunInput(params: SubagentParameters): {
 	}
 	return {
 		role,
-		taskContract: params.taskContract,
+		workerBriefing: params.workerBriefing,
 		expectedOutputContract: params.expectedOutputContract,
 		profile,
 	};
@@ -143,7 +164,7 @@ export default function registerSWEForgeSubagent(
 		name: SWE_FORGE_SUBAGENT_TOOL_NAME,
 		label: "SWE Forge Child Agent",
 		description:
-			"SWE Forge runtime primitive. action=capabilities reports observed runtime support; action=run executes exactly one bounded canonical task. No chains, arrays, background jobs, resume, steer, recursion, worktrees, workflow/topology selection, or delivery actions.",
+			"SWE Forge runtime primitive. action=capabilities reports observed runtime support; action=run transports exactly one bounded worker_briefing/v1 launch. No chains, arrays, background jobs, resume, steer, recursion, worktrees, workflow/topology selection, or delivery actions.",
 		parameters: SubagentParameters,
 		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
 			if (params.action === "capabilities") {
@@ -165,7 +186,7 @@ export default function registerSWEForgeSubagent(
 			const input = requiredRunInput(params);
 			const result = await executeTask({
 				role: input.role,
-				taskContract: input.taskContract,
+				workerBriefing: input.workerBriefing,
 				expectedOutputContract: input.expectedOutputContract,
 				profile: input.profile,
 				cwd: ctx.cwd,

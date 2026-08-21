@@ -63,8 +63,9 @@ The extension does not intercept `/swe-forge`, select `SOLO`/`SUBAGENTS`/
 capability available to Pi; the canonical SWE-Forge adapter decides whether to
 use it.
 
-The canonical public task API is `executeSWEForgeTask` with task fields
-`role` and `profile`; its result has `output`, `runtime`, and `validation`.
+The canonical public task API is `executeSWEForgeTask` with launch fields
+`role`, `workerBriefing`, `expectedOutputContract`, and `profile`; its result has
+`output`, `runtime`, and `validation`.
 Capability discovery is `getSWEForgeCapabilities`, whose `packageVersion` is
 implementation metadata and whose `protocolVersion` is the independent wire
 contract version. Low-level Pi transport, argument-building, and checkout-lock
@@ -150,11 +151,14 @@ The tool exposes exactly two actions:
   trust semantics, discovered canonical roles, compatibility errors, the
   closed tool profiles, read-only overlap support, and the fact that writable
   concurrency and nested delegation are unsupported.
-- `action: "run"` executes exactly one bounded task. The caller supplies
-  `role`, `taskContract`, `expectedOutputContract` (`result` or `review`), and
-  `profile` (`READ_ONLY` or `WRITABLE`).
+- `action: "run"` executes exactly one bounded worker briefing. The caller
+  supplies `role`, `workerBriefing`, `expectedOutputContract` (`result` or
+  `review`), and `profile` (`READ_ONLY` or `WRITABLE`).
 
-A run loads the selected role and expected output contract live, composes one
+`workerBriefing` is the root-rendered `worker_briefing/v1` projection for this
+specific launch. SWE Forge renders and owns it; this package only validates and
+transports the small execution shape. A run loads the selected role and
+expected output contract live, composes one
 explicit prompt, starts one fresh Pi JSON subprocess, returns canonical output
 separately from bounded runtime diagnostics, and validates the recognizable
 canonical result shape. Successful Pi compatibility verification is cached for
@@ -189,9 +193,11 @@ success.
 | `READ_ONLY` | `read`, `grep`, `find`, `ls` | May inspect the checkout; no edit, write, or shell tool. |
 | `WRITABLE` | The read-only tools plus `edit`, `write`, `bash` | May modify files and run commands with the invoking user's normal OS permissions. |
 
-A canonical task's concrete `write_access` metadata must agree with the
-selected profile when it is present. Profiles restrict Pi tools exposed to the
-child; they are not an operating-system sandbox. In particular, `WRITABLE`
+A worker briefing's concrete `permissions.write_access` must agree with the
+selected profile. Its `permissions.topology` must be `SUBAGENTS` and
+`permissions.write_isolation` must be `SHARED`; this primitive rejects other
+execution shapes rather than choosing or repairing them. Profiles restrict Pi
+tools exposed to the child; they are not an operating-system sandbox. In particular, `WRITABLE`
 does not grant extra permissions and `READ_ONLY` is not a guarantee against
 other processes modifying the filesystem.
 

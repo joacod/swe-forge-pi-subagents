@@ -15,7 +15,7 @@ boundary, transport, and child-access coordination details:
 
 - discover canonical role names and load selected role/contract markdown from
   the detected support root without copying or translating it;
-- compose one bounded prompt from the selected role, supplied task contract,
+- compose one bounded prompt from the selected role, supplied worker briefing,
   expected output contract, and the required Pi-runtime guardrail;
 - launch a child with an explicit checkout, model, prompt, and tool allowlist;
 - guard each child lifetime with a local per-cwd shared-read/exclusive-write
@@ -168,16 +168,17 @@ The package exposes a narrow `executeSWEForgeTask` runner and a Pi extension
 tool that delegates to it. Capability discovery is explicitly versioned with
 `protocolVersion: 1`, independent of `packageVersion`. It does not expose
 parallel, chain, role, or workflow APIs.
-The parent supplies the task contract and role instructions as an explicit
-system-prompt append; the child uses Pi's normal built-in system prompt and
-tools but no discovered extensions, skills, templates, context files, or themes.
+The parent supplies the root-rendered worker briefing and selected role as an
+explicit system-prompt append; the child uses Pi's normal built-in system
+prompt and tools but no discovered extensions, skills, templates, context files,
+or themes.
 The only profiles are `READ_ONLY` (`read`, `grep`, `find`, `ls`) and `WRITABLE`
 (the read-only tools plus `edit`, `write`, `bash`). This makes resource loading
 predictable and prevents the adapter's own extension from being rediscovered
 recursively. Profiles restrict model-visible Pi tools, not the operating-system
 permissions of the child process.
 
-The package entry point exposes the canonical task boundary and the
+The package entry point exposes the worker-briefing execution boundary and the
 projection/capability surfaces needed to integrate it. Generic transport,
 argument-building, and checkout-lock helpers remain implementation details, not
 another public child-agent framework.
