@@ -12,6 +12,9 @@ const EXPECTED_OUTPUT_CONTRACT_NAMES = ["result", "review"] as const;
 /** Keep canonical prompt material bounded before it reaches a child context. */
 export const MAX_CANONICAL_SOURCE_BYTES = 512 * 1024;
 
+/** Keep model-visible worker results small enough for the orchestrator context. */
+export const MAX_WORKER_RESULT_BYTES = 64 * 1024;
+
 const CONTRACT_FILE_NAMES: Record<CanonicalContractName, string> = {
 	task: "task.md",
 	result: "result.md",
@@ -270,9 +273,14 @@ async function readRoleNamesAt(installation: SWEForgeInstallation): Promise<read
  */
 const REQUIRED_CANONICAL_CONTRACT_FIELDS: Record<CanonicalContractName, readonly string[]> = {
 	task: ["task_id", "objective"],
-	result: ["STATUS", "SUMMARY", "VALIDATION"],
+	result: ["STATUS"],
 	review: ["status", "review_focus", "findings"],
 };
+
+const RESULT_STRUCTURE_ALTERNATIVES: readonly (readonly string[])[] = [
+	["SUMMARY", "VALIDATION"],
+	["RESULT_PROFILE", "TASK_ID", "FINDINGS", "EVIDENCE"],
+];
 
 const CANONICAL_RESULT_STATUSES = Object.freeze(["DONE", "BLOCKED", "FAILED"] as const);
 const CANONICAL_REVIEW_STATUSES = Object.freeze(["PASS", "CHANGES_REQUIRED"] as const);
@@ -287,6 +295,9 @@ function validateCanonicalContractMarkdown(
 	);
 	if (missing.length > 0) {
 		throw canonicalSourceInvalid(path, `missing required field(s): ${missing.join(", ")}`);
+	}
+	if (contractName === "result" && !RESULT_STRUCTURE_ALTERNATIVES.some((fields) => fields.every((field) => parsedField(markdown, field).present))) {
+		throw canonicalSourceInvalid(path, "missing required result structure: SUMMARY/VALIDATION or RESULT_PROFILE/FINDINGS/EVIDENCE");
 	}
 }
 
@@ -524,8 +535,8 @@ export function validateTaskContract(
 	};
 }
 
-function outputStructureFields(expectedOutputContract: ExpectedOutputContract): readonly string[] {
-	return expectedOutputContract === "result" ? ["SUMMARY", "VALIDATION"] : ["REVIEW_FOCUS", "FINDINGS"];
+function outputStructureAlternatives(expectedOutputContract: ExpectedOutputContract): readonly (readonly string[])[] {
+	return expectedOutputContract === "result" ? RESULT_STRUCTURE_ALTERNATIVES : [["REVIEW_FOCUS", "FINDINGS"]];
 }
 
 /**
@@ -547,11 +558,11 @@ export function validateCanonicalOutput(
 	if (typeof output !== "string" || output.trim().length === 0) {
 		throw new SWEForgeRuntimeError("EMPTY_OUTPUT", "The worker returned an empty canonical output.");
 	}
-	if (Buffer.byteLength(output, "utf8") > MAX_CANONICAL_SOURCE_BYTES) {
+	if (Buffer.byteLength(output, "utf8") > MAX_WORKER_RESULT_BYTES) {
 		throw new SWEForgeRuntimeError(
 			"OUTPUT_TOO_LARGE",
-			`The worker output exceeds the ${MAX_CANONICAL_SOURCE_BYTES}-byte limit.`,
-			{ details: { maxBytes: MAX_CANONICAL_SOURCE_BYTES } },
+			`The worker output exceeds the ${MAX_WORKER_RESULT_BYTES}-byte limit.`,
+			{ details: { maxBytes: MAX_WORKER_RESULT_BYTES } },
 		);
 	}
 	if (output.includes("\uFFFD")) {
@@ -593,13 +604,15 @@ export function validateCanonicalOutput(
 		);
 	}
 
-	const missingStructure = outputStructureFields(expectedOutputContract).filter(
-		(field) => !parsedField(output, field).present,
+	const structureAlternatives = outputStructureAlternatives(expectedOutputContract);
+	const hasRecognizableStructure = structureAlternatives.some((fields) =>
+		fields.every((field) => parsedField(output, field).present),
 	);
-	if (missingStructure.length > 0) {
+	if (!hasRecognizableStructure) {
+		const missingStructure = structureAlternatives.map((fields) => fields.join("/"));
 		throw new SWEForgeRuntimeError(
 			"MISSING_OUTPUT_STRUCTURE",
-			`The ${expectedOutputContract} output is missing recognizable canonical structure: ${missingStructure.join(", ")}`,
+			`The ${expectedOutputContract} output is missing recognizable canonical structure: ${missingStructure.join(" or ")}`,
 			{ details: { missingStructure, expectedOutputContract } },
 		);
 	}

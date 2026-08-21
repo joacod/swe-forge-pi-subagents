@@ -23,6 +23,10 @@ const RESULT_OUTPUT = "STATUS: DONE\nTASK_ID: task-123\nSUMMARY: fixture complet
 const FIXTURE_SOURCE = String.raw`import { existsSync, readFileSync, writeFileSync } from "node:fs";
 
 const args = process.argv.slice(2);
+if (args.includes("--version")) {
+  process.stdout.write("0.84.2\n");
+  process.exit(0);
+}
 const promptIndex = args.indexOf("--append-system-prompt");
 const promptPath = promptIndex >= 0 ? args[promptIndex + 1] : undefined;
 const recordPath = process.env.SWE_FORGE_FIXTURE_RECORD;
@@ -34,10 +38,14 @@ if (mode === "hang") {
   setInterval(() => {}, 1000);
 } else if (mode === "malformed") {
   const message = { role: "assistant", content: [{ type: "text", text: "STATUS: DONE\nTASK_ID: task-123\nSUMMARY: incomplete\n" }], stopReason: "stop" };
+  process.stdout.write(JSON.stringify({ type: "agent_start" }) + "\n");
+  process.stdout.write(JSON.stringify({ type: "turn_start" }) + "\n");
   process.stdout.write(JSON.stringify({ type: "message_end", message }) + "\n");
   process.stdout.write(JSON.stringify({ type: "agent_end", messages: [message] }) + "\n");
 } else {
-  const message = { role: "assistant", content: [{ type: "text", text: ${JSON.stringify(RESULT_OUTPUT)} }], stopReason: "stop" };
+  const message = { role: "assistant", content: [{ type: "text", text: ${JSON.stringify(RESULT_OUTPUT)} }], stopReason: "stop", usage: { input: 11, output: 7, cacheRead: 3, cacheWrite: 2, totalTokens: 23, cost: { input: 0.1, output: 0.2, cacheRead: 0.03, cacheWrite: 0.02, total: 0.35 } } };
+  process.stdout.write(JSON.stringify({ type: "agent_start" }) + "\n");
+  process.stdout.write(JSON.stringify({ type: "turn_start" }) + "\n");
   process.stdout.write(JSON.stringify({ type: "message_end", message }) + "\n");
   process.stdout.write(JSON.stringify({ type: "agent_end", messages: [message] }) + "\n");
 }`;
@@ -243,6 +251,14 @@ test("runs one valid read-only task with canonical output as primary content", a
 	assert.equal(result.details.runtime.text, undefined);
 	assert.equal(result.details.runtime.assistantMessage, undefined);
 	assert.equal(result.details.output, undefined);
+	assert.deepEqual(result.details.runtime.diagnostics.usage, {
+		inputTokens: 11,
+		outputTokens: 7,
+		cacheReadTokens: 3,
+		cacheWriteTokens: 2,
+		totalTokens: 23,
+		cost: 0.35,
+	});
 	assert.equal(result.details.validation.status, "DONE");
 });
 

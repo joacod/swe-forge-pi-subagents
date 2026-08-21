@@ -13,7 +13,7 @@ import {
 	WRITABLE_TOOLS,
 } from "../src/runtime.js";
 import { SWE_FORGE_ROOT_ENV } from "../src/discovery.js";
-import { SWEForgeRuntimeError } from "../src/projection.js";
+import { MAX_WORKER_RESULT_BYTES, SWEForgeRuntimeError } from "../src/projection.js";
 import { copyFakeSWEForgeInstallation } from "./fixtures.js";
 
 const temporaryPaths: string[] = [];
@@ -23,12 +23,20 @@ const TASK_CONTRACT = "# Task Contract\n\nTASK_ID: task-123\nOBJECTIVE: bounded 
 const RESULT_OUTPUT = "STATUS: DONE\nTASK_ID: task-123\nSUMMARY: fixture complete\nVALIDATION: fixture passed\n";
 const REVIEW_OUTPUT = "STATUS: PASS\nTASK_ID: task-123\nREVIEW_FOCUS: fixture review\nFINDINGS: []\n";
 
-const FIXTURE_SOURCE = String.raw`import { existsSync, readFileSync, writeFileSync } from "node:fs";
+const FIXTURE_SOURCE = String.raw`import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 
 const args = process.argv.slice(2);
 const promptIndex = args.indexOf("--append-system-prompt");
 const promptPath = promptIndex >= 0 ? args[promptIndex + 1] : undefined;
 const recordPath = process.env.SWE_FORGE_FIXTURE_RECORD;
+const probeRecordPath = process.env.SWE_FORGE_FIXTURE_PROBE_RECORD;
+if (args.includes("--version")) {
+  const versionFile = process.env.SWE_FORGE_FIXTURE_VERSION_FILE;
+  const version = versionFile ? readFileSync(versionFile, "utf8").trim() : process.env.SWE_FORGE_FIXTURE_VERSION ?? "0.84.2";
+  if (probeRecordPath) appendFileSync(probeRecordPath, "probe\n");
+  process.stdout.write(version + "\n");
+  process.exit(0);
+}
 const record = {
   args,
   cwd: process.cwd(),
@@ -49,11 +57,20 @@ if (mode === "hang") {
 } else {
   if (mode === "noise") process.stdout.write("not-json\n");
   if (mode === "invalid-utf8") process.stdout.write(Buffer.from([123, 34, 116, 121, 112, 101, 34, 58, 34, 110, 111, 105, 115, 101, 34, 44, 34, 120, 34, 58, 34, 255, 34, 125, 10]));
-  const output = mode === "review" ? ${JSON.stringify(REVIEW_OUTPUT)} : mode === "malformed" ? "STATUS: DONE\nTASK_ID: task-123\nSUMMARY: incomplete\n" : mode === "truncated" ? "STATUS: DONE\nTASK_ID: task-123\nSUMMARY: " + "x".repeat(300000) + "\nVALIDATION: fixture passed\n" : ${JSON.stringify(RESULT_OUTPUT)};
+  const sizePrefix = "STATUS: DONE\nTASK_ID: task-123\nSUMMARY: ";
+  const sizeSuffix = "\nVALIDATION: fixture passed\n";
+  const requestedBytes = Number(process.env.SWE_FORGE_FIXTURE_RESULT_BYTES ?? "0");
+  const sizedOutput = sizePrefix + "x".repeat(Math.max(0, requestedBytes - Buffer.byteLength(sizePrefix + sizeSuffix))) + sizeSuffix;
+  const output = mode === "review" ? ${JSON.stringify(REVIEW_OUTPUT)} : mode === "malformed" ? "STATUS: DONE\nTASK_ID: task-123\nSUMMARY: incomplete\n" : mode === "truncated" ? "STATUS: DONE\nTASK_ID: task-123\nSUMMARY: " + "x".repeat(300000) + "\nVALIDATION: fixture passed\n" : mode === "sized" ? sizedOutput : ${JSON.stringify(RESULT_OUTPUT)};
+  const usage = mode === "no-usage" ? undefined : { input: 11, output: 7, cacheRead: 3, cacheWrite: 2, totalTokens: 23, cost: { input: 0.1, output: 0.2, cacheRead: 0.03, cacheWrite: 0.02, total: 0.35 } };
   const intermediate = { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "intermediate" }], stopReason: "toolUse" } };
-  const final = { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: output }], stopReason: "stop" } };
+  const finalMessage = { role: "assistant", content: [{ type: "text", text: output }], stopReason: "stop", ...(usage ? { usage } : {}) };
+  const final = { type: "message_end", message: finalMessage };
   const conflicting = { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "STATUS: BLOCKED\nTASK_ID: task-123\nSUMMARY: conflicting\nVALIDATION: fixture conflict\n" }], stopReason: "stop" } };
   const ended = { type: "agent_end", messages: [final.message] };
+  process.stdout.write(JSON.stringify({ type: "agent_start" }) + "\n");
+  process.stdout.write(JSON.stringify({ type: "turn_start" }) + "\n");
+  process.stdout.write(JSON.stringify({ type: "message_update", usage: usage ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "ignored" } }) + "\n");
   process.stdout.write(JSON.stringify(intermediate) + "\n");
   if (mode === "conflicting") process.stdout.write(JSON.stringify(conflicting) + "\n");
   process.stdout.write(JSON.stringify(final) + "\n");
@@ -117,6 +134,14 @@ async function readRecord(path: string): Promise<{ args: string[]; cwd: string; 
 	};
 }
 
+async function readProbeCount(path: string): Promise<number> {
+	try {
+		return (await readFile(path, "utf8")).trim().split("\n").filter(Boolean).length;
+	} catch {
+		return 0;
+	}
+}
+
 function optionValue(args: readonly string[], option: string): string | undefined {
 	const index = args.indexOf(option);
 	return index >= 0 ? args[index + 1] : undefined;
@@ -129,6 +154,8 @@ function childOptions(
 	mode: string,
 	profile: "READ_ONLY" | "WRITABLE",
 	model = "fixture/model",
+	extraEnv: NodeJS.ProcessEnv = {},
+	piCommandArgs: readonly string[] = [fixturePath],
 ) {
 	return {
 		role: profile === "READ_ONLY" ? "reader" : "writer",
@@ -139,10 +166,11 @@ function childOptions(
 		model,
 		discovery: discovery(root),
 		piCommand: process.execPath,
-		piCommandArgs: [fixturePath],
+		piCommandArgs,
 		env: {
 			SWE_FORGE_FIXTURE_RECORD: record,
 			SWE_FORGE_FIXTURE_MODE: mode,
+			...extraEnv,
 		},
 	};
 }
@@ -179,6 +207,20 @@ test("runs a read-only role with only the READ_ONLY profile and removes prompt m
 	assert.equal(result.runtime.profile, "READ_ONLY");
 	assert.deepEqual(result.runtime.tools, READ_ONLY_TOOLS);
 	assert.equal(result.runtime.cleanup, "complete");
+	assert.ok((result.runtime.diagnostics?.compatibilityCheckDurationMs ?? -1) >= 0);
+	assert.ok((result.runtime.diagnostics?.queueWaitDurationMs ?? -1) >= 0);
+	assert.ok((result.runtime.diagnostics?.childStartupDurationMs ?? -1) >= 0);
+	assert.ok((result.runtime.diagnostics?.agentExecutionDurationMs ?? -1) >= 0);
+	assert.ok((result.runtime.diagnostics?.totalRuntimeDurationMs ?? -1) >= 0);
+	assert.equal(result.runtime.diagnostics?.turns, 1);
+	assert.deepEqual(result.runtime.diagnostics?.usage, {
+		inputTokens: 11,
+		outputTokens: 7,
+		cacheReadTokens: 3,
+		cacheWriteTokens: 2,
+		totalTokens: 23,
+		cost: 0.35,
+	});
 	assert.equal(record.cwd, await realpath(project));
 	assert.equal(optionValue(record.args, "--model"), "fixture/model");
 	assert.equal(optionValue(record.args, "--tools"), READ_ONLY_TOOLS.join(","));
@@ -196,6 +238,119 @@ test("runs a read-only role with only the READ_ONLY profile and removes prompt m
 	assert.match(record.prompt ?? "", /EXPECTED CANONICAL RESULT CONTRACT/u);
 	assert.ok(record.promptPath);
 	await assert.rejects(access(record.promptPath));
+});
+
+test("caches one successful Pi compatibility probe for repeated invocation configuration", async () => {
+	const root = await createCanonicalRoot();
+	const project = await createProject();
+	const recordPathValue = await recordPath();
+	const probePath = await recordPath();
+	const options = childOptions(root, project, recordPathValue, "success", "READ_ONLY", "fixture/model", {
+		SWE_FORGE_FIXTURE_PROBE_RECORD: probePath,
+	});
+
+	const first = await executeSWEForgeTask(options);
+	const second = await executeSWEForgeTask(options);
+
+	assert.equal(first.runtime.status, "completed");
+	assert.equal(second.runtime.status, "completed");
+	assert.ok((first.runtime.diagnostics?.compatibilityCheckDurationMs ?? -1) >= 0);
+	assert.equal(second.runtime.diagnostics?.compatibilityCheckDurationMs, undefined);
+	assert.equal(await readProbeCount(probePath), 1);
+});
+
+test("coalesces concurrent compatibility probes for read-only workers", async () => {
+	const root = await createCanonicalRoot();
+	const project = await createProject();
+	const recordPathValue = await recordPath();
+	const probePath = await recordPath();
+	const options = childOptions(root, project, recordPathValue, "success", "READ_ONLY", "fixture/model", {
+		SWE_FORGE_FIXTURE_PROBE_RECORD: probePath,
+	});
+
+	const [first, second] = await Promise.all([executeSWEForgeTask(options), executeSWEForgeTask(options)]);
+
+	assert.equal(first.runtime.status, "completed");
+	assert.equal(second.runtime.status, "completed");
+	assert.equal(await readProbeCount(probePath), 1);
+});
+
+test("does not cache an unsupported Pi version failure", async () => {
+	const root = await createCanonicalRoot();
+	const project = await createProject();
+	const recordPathValue = await recordPath();
+	const probePath = await recordPath();
+	const versionDirectory = await mkdtemp(join(tmpdir(), "swe-forge-runtime-version-"));
+	temporaryPaths.push(versionDirectory);
+	const versionPath = join(versionDirectory, "version.txt");
+	await writeFile(versionPath, "0.85.0\n", "utf8");
+	const options = childOptions(root, project, recordPathValue, "success", "READ_ONLY", "fixture/model", {
+		SWE_FORGE_FIXTURE_PROBE_RECORD: probePath,
+		SWE_FORGE_FIXTURE_VERSION_FILE: versionPath,
+	});
+
+	const unsupported = await executeSWEForgeTask(options);
+	assert.equal(unsupported.runtime.status, "failed");
+	assert.match(unsupported.runtime.errorMessage ?? "", /Unsupported Pi version/u);
+	await assert.rejects(access(recordPathValue));
+
+	await writeFile(versionPath, "0.84.2\n", "utf8");
+	const supported = await executeSWEForgeTask(options);
+	assert.equal(supported.runtime.status, "completed");
+	assert.equal(await readProbeCount(probePath), 2);
+});
+
+test("executes successfully through the minimum supported Pi version probe", async () => {
+	const root = await createCanonicalRoot();
+	const project = await createProject();
+	const recordPathValue = await recordPath();
+	const probePath = await recordPath();
+	const result = await executeSWEForgeTask(
+		childOptions(root, project, recordPathValue, "success", "READ_ONLY", "fixture/model", {
+			SWE_FORGE_FIXTURE_PROBE_RECORD: probePath,
+			SWE_FORGE_FIXTURE_VERSION: "0.84.1",
+		}),
+	);
+
+	assert.equal(result.runtime.status, "completed");
+	assert.equal(result.runtime.piVersion, "0.84.1");
+	assert.equal(await readProbeCount(probePath), 1);
+});
+
+test("rechecks when the Pi invocation configuration changes", async () => {
+	const root = await createCanonicalRoot();
+	const project = await createProject();
+	const recordPathValue = await recordPath();
+	const probePath = await recordPath();
+	const options = childOptions(root, project, recordPathValue, "success", "READ_ONLY", "fixture/model", {
+		SWE_FORGE_FIXTURE_PROBE_RECORD: probePath,
+	});
+
+	await executeSWEForgeTask(options);
+	await executeSWEForgeTask(
+		childOptions(
+			root,
+			project,
+			recordPathValue,
+			"success",
+			"READ_ONLY",
+			"fixture/model",
+			{ SWE_FORGE_FIXTURE_PROBE_RECORD: probePath },
+			[fixturePath, "alternate-invocation"],
+		),
+	);
+
+	assert.equal(await readProbeCount(probePath), 2);
+});
+
+test("omits usage diagnostics when the final assistant message has no usage", async () => {
+	const root = await createCanonicalRoot();
+	const project = await createProject();
+	const recordPathValue = await recordPath();
+	const result = await executeSWEForgeTask(childOptions(root, project, recordPathValue, "no-usage", "READ_ONLY"));
+
+	assert.equal(result.runtime.status, "completed");
+	assert.equal(result.runtime.diagnostics?.usage, undefined);
 });
 
 test("normalizes a symlinked cwd before launching the child", async () => {
@@ -299,9 +454,12 @@ test("rejects a malformed worker result and still cleans up the prompt", async (
 		executeSWEForgeTask(childOptions(root, project, recordPathValue, "malformed", "READ_ONLY")),
 		(error: unknown) =>
 			error instanceof SWEForgeRuntimeError &&
-				error.code === "MISSING_OUTPUT_STRUCTURE" &&
-				error.details &&
-				(error.details.runtime as { status: string }).status === "completed",
+			error.code === "MISSING_OUTPUT_STRUCTURE" &&
+			error.details &&
+			(error.details.runtime as { status: string; text?: string; assistantMessage?: unknown }).status === "completed" &&
+			error.details.output === undefined &&
+			(error.details.runtime as { text?: string }).text === undefined &&
+			(error.details.runtime as { assistantMessage?: unknown }).assistantMessage === undefined,
 	);
 	const record = await readRecord(recordPathValue);
 	assert.ok(record.promptPath);
@@ -353,6 +511,52 @@ test("fails closed on invalid UTF-8 event data", async () => {
 	assert.equal(result.validation, undefined);
 });
 
+test("accepts a comfortably bounded worker result", async () => {
+	const root = await createCanonicalRoot();
+	const project = await createProject();
+	const recordPathValue = await recordPath();
+	const result = await executeSWEForgeTask(
+		childOptions(root, project, recordPathValue, "sized", "READ_ONLY", "fixture/model", {
+			SWE_FORGE_FIXTURE_RESULT_BYTES: "1024",
+		}),
+	);
+
+	assert.equal(result.runtime.status, "completed");
+	assert.equal(Buffer.byteLength(result.output, "utf8"), 1024);
+	assert.equal(result.validation?.status, "DONE");
+});
+
+test("accepts a worker result exactly at the named boundary", async () => {
+	const root = await createCanonicalRoot();
+	const project = await createProject();
+	const recordPathValue = await recordPath();
+	const result = await executeSWEForgeTask(
+		childOptions(root, project, recordPathValue, "sized", "READ_ONLY", "fixture/model", {
+			SWE_FORGE_FIXTURE_RESULT_BYTES: String(MAX_WORKER_RESULT_BYTES),
+		}),
+	);
+
+	assert.equal(result.runtime.status, "completed");
+	assert.equal(Buffer.byteLength(result.output, "utf8"), MAX_WORKER_RESULT_BYTES);
+});
+
+test("fails closed without model-visible partial content above the result boundary", async () => {
+	const root = await createCanonicalRoot();
+	const project = await createProject();
+	const recordPathValue = await recordPath();
+	const result = await executeSWEForgeTask(
+		childOptions(root, project, recordPathValue, "sized", "READ_ONLY", "fixture/model", {
+			SWE_FORGE_FIXTURE_RESULT_BYTES: String(MAX_WORKER_RESULT_BYTES + 1),
+		}),
+	);
+
+	assert.equal(result.output, "");
+	assert.equal(result.runtime.status, "failed");
+	assert.equal(result.runtime.outputTruncated, true);
+	assert.match(result.runtime.errorMessage ?? "", /exceeded the 65536-byte limit/u);
+	assert.equal(result.validation, undefined);
+});
+
 test("fails closed when model output is truncated", async () => {
 	const root = await createCanonicalRoot();
 	const project = await createProject();
@@ -361,7 +565,7 @@ test("fails closed when model output is truncated", async () => {
 
 	assert.equal(result.runtime.status, "failed");
 	assert.equal(result.runtime.outputTruncated, true);
-	assert.match(result.runtime.errorMessage ?? "", /truncated/u);
+	assert.match(result.runtime.errorMessage ?? "", /exceeded|truncated/u);
 	assert.equal(result.validation, undefined);
 });
 

@@ -295,7 +295,7 @@ async function scenarioE() {
 	const child = join(directory, "malformed-child.mjs");
 	await writeFile(
 		child,
-		`const message = { role: "assistant", content: [{ type: "text", text: "STATUS: DONE\\nTASK_ID: acceptance-malformed\\nSUMMARY: truncated" }], stopReason: "stop" };\nprocess.stdout.write(JSON.stringify({ type: "message_end", message }) + "\\n" + JSON.stringify({ type: "agent_end", messages: [message] }) + "\\n");\n`,
+		`if (process.argv.includes("--version")) { process.stdout.write("0.84.2\\n"); process.exit(0); }\nconst message = { role: "assistant", content: [{ type: "text", text: "STATUS: DONE\\nTASK_ID: acceptance-malformed\\nSUMMARY: truncated" }], stopReason: "stop" };\nprocess.stdout.write(JSON.stringify({ type: "message_end", message }) + "\\n" + JSON.stringify({ type: "agent_end", messages: [message] }) + "\\n");\n`,
 		"utf8",
 	);
 	await assertRejectsCode(

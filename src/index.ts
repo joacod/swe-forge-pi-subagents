@@ -27,6 +27,8 @@ export {
 } from "./runtime.js";
 export type {
 	BuiltinTool,
+	ChildAgentRuntimeDiagnostics,
+	ChildAgentUsageDiagnostics,
 	ChildToolProfile,
 	SWEForgeTaskOptions,
 	SWEForgeTaskResult,

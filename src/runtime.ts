@@ -1,9 +1,11 @@
+import { createHash } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdtemp, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { StringDecoder } from "node:string_decoder";
+import { performance } from "node:perf_hooks";
 import {
 	checkoutScheduler,
 	isCheckoutAbortError,
@@ -17,6 +19,7 @@ import {
 	SWEForgeRuntimeError,
 	type CanonicalOutputValidation,
 	type ExpectedOutputContract,
+	MAX_WORKER_RESULT_BYTES,
 	validateCanonicalOutput,
 	validateTaskContract,
 } from "./projection.js";
@@ -49,7 +52,6 @@ export const DELEGATION_TOOL_NAMES = Object.freeze(["subagent", "swe_forge_subag
 
 /** Keep diagnostics bounded; the final worker output is bounded separately. */
 export const MAX_STDERR_BYTES = 16 * 1024;
-export const MAX_WORKER_OUTPUT_BYTES = 256 * 1024;
 export const MAX_EVENT_LINE_BYTES = 512 * 1024;
 
 /**
@@ -92,6 +94,29 @@ export interface ChildAgentOptions {
 	readonly env?: NodeJS.ProcessEnv;
 }
 
+export interface ChildAgentUsageDiagnostics {
+	readonly inputTokens?: number;
+	readonly outputTokens?: number;
+	readonly cacheReadTokens?: number;
+	readonly cacheWriteTokens?: number;
+	readonly totalTokens?: number;
+	readonly cost?: number;
+}
+
+export interface ChildAgentRuntimeDiagnostics {
+	readonly compatibilityCheckDurationMs?: number;
+	readonly queueWaitDurationMs?: number;
+	readonly childStartupDurationMs?: number;
+	readonly agentExecutionDurationMs?: number;
+	readonly totalRuntimeDurationMs?: number;
+	readonly usage?: ChildAgentUsageDiagnostics;
+	readonly turns?: number;
+}
+
+type MutableChildAgentRuntimeDiagnostics = {
+	-readonly [Key in keyof ChildAgentRuntimeDiagnostics]?: ChildAgentRuntimeDiagnostics[Key];
+};
+
 export interface ChildAgentResult {
 	readonly status: ChildAgentStatus;
 	readonly exitCode: number | null;
@@ -103,6 +128,7 @@ export interface ChildAgentResult {
 	readonly outputTruncated?: boolean;
 	readonly eventStreamError?: string;
 	readonly piVersion?: string;
+	readonly diagnostics?: ChildAgentRuntimeDiagnostics;
 }
 
 export interface ChildInvocation {
@@ -177,6 +203,10 @@ interface ChildState {
 	canonicalTexts: string[];
 	stopReason?: string;
 	errorMessage?: string;
+	agentStartedAt?: number;
+	agentEndedAt?: number;
+	turnCount: number;
+	usage?: ChildAgentUsageDiagnostics;
 	agentEnded: boolean;
 	outputTruncated: boolean;
 	eventStreamError?: string;
@@ -190,16 +220,47 @@ function asNonEmptyString(value: unknown): string | undefined {
 	return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
+function elapsedMilliseconds(startedAt: number, finishedAt = performance.now()): number {
+	return Math.max(0, Math.round(finishedAt - startedAt));
+}
+
+function finiteNonNegativeNumber(value: unknown): number | undefined {
+	return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
+function usageDiagnostics(value: unknown): ChildAgentUsageDiagnostics | undefined {
+	if (!isRecord(value)) return undefined;
+	const inputTokens = finiteNonNegativeNumber(value.input);
+	const outputTokens = finiteNonNegativeNumber(value.output);
+	const cacheReadTokens = finiteNonNegativeNumber(value.cacheRead);
+	const cacheWriteTokens = finiteNonNegativeNumber(value.cacheWrite);
+	const totalTokens = finiteNonNegativeNumber(value.totalTokens);
+	const cost = isRecord(value.cost) ? finiteNonNegativeNumber(value.cost.total) : undefined;
+	if (
+		inputTokens === undefined &&
+		outputTokens === undefined &&
+		cacheReadTokens === undefined &&
+		cacheWriteTokens === undefined &&
+		totalTokens === undefined &&
+		cost === undefined
+	) {
+		return undefined;
+	}
+	return {
+		...(inputTokens === undefined ? {} : { inputTokens }),
+		...(outputTokens === undefined ? {} : { outputTokens }),
+		...(cacheReadTokens === undefined ? {} : { cacheReadTokens }),
+		...(cacheWriteTokens === undefined ? {} : { cacheWriteTokens }),
+		...(totalTokens === undefined ? {} : { totalTokens }),
+		...(cost === undefined ? {} : { cost }),
+	};
+}
+
 function boundedUtf8(value: string, maxBytes: number): { readonly value: string; readonly truncated: boolean } {
 	const bytes = Buffer.from(value, "utf8");
 	if (bytes.byteLength <= maxBytes) return { value, truncated: false };
 
-	let end = maxBytes;
-	while (end > 0 && (bytes[end] & 0xc0) === 0x80) end--;
-	return {
-		value: `${bytes.subarray(0, end).toString("utf8")}\n[worker output truncated]`,
-		truncated: true,
-	};
+	return { value: "", truncated: true };
 }
 
 function appendBounded(current: string, chunk: string, maxBytes: number, marker: string): string {
@@ -511,12 +572,13 @@ function applyAssistantMessage(message: JsonObject, state: ChildState): void {
 	if (message.role !== "assistant") return;
 
 	state.assistantMessage = message;
-	const bounded = boundedUtf8(textFromMessage(message), MAX_WORKER_OUTPUT_BYTES);
+	const bounded = boundedUtf8(textFromMessage(message), MAX_WORKER_RESULT_BYTES);
 	state.text = bounded.value;
-	state.outputTruncated = bounded.truncated;
+	state.outputTruncated ||= bounded.truncated;
+	state.usage = usageDiagnostics(message.usage);
 	state.stopReason = asNonEmptyString(message.stopReason);
 	state.errorMessage = asNonEmptyString(message.errorMessage);
-	recordCanonicalCandidate(bounded.value, state);
+	if (!bounded.truncated) recordCanonicalCandidate(bounded.value, state);
 }
 
 function textFromMessage(message: JsonObject): string {
@@ -551,6 +613,14 @@ function processChildEvent(line: string, state: ChildState): void {
 		state.eventStreamError ??= "stdout contained an event without a type";
 		return;
 	}
+	if (event.type === "agent_start") {
+		state.agentStartedAt ??= performance.now();
+		return;
+	}
+	if (event.type === "turn_start") {
+		state.turnCount += 1;
+		return;
+	}
 	if (event.type === "message_end") {
 		if (!isRecord(event.message)) {
 			state.eventStreamError ??= "message_end did not contain a message object";
@@ -560,6 +630,7 @@ function processChildEvent(line: string, state: ChildState): void {
 		return;
 	}
 	if (event.type === "agent_end") {
+		state.agentEndedAt ??= performance.now();
 		state.agentEnded = true;
 		if (event.messages !== undefined && !Array.isArray(event.messages)) {
 			state.eventStreamError ??= "agent_end.messages was not an array";
@@ -581,6 +652,37 @@ function failedResult(errorMessage: string, stderr = ""): ChildAgentResult {
 		stderr,
 		errorMessage,
 	};
+}
+
+function withDiagnostics(
+	result: ChildAgentResult,
+	diagnostics: Partial<ChildAgentRuntimeDiagnostics>,
+): ChildAgentResult {
+	return {
+		...result,
+		diagnostics: {
+			...(result.diagnostics ?? {}),
+			...diagnostics,
+		},
+	};
+}
+
+function childDiagnostics(
+	state: ChildState,
+	spawnStartedAt: number | undefined,
+	compatibilityCheckDurationMs: number | undefined,
+): Partial<ChildAgentRuntimeDiagnostics> {
+	const diagnostics: MutableChildAgentRuntimeDiagnostics = {};
+	if (compatibilityCheckDurationMs !== undefined) diagnostics.compatibilityCheckDurationMs = compatibilityCheckDurationMs;
+	if (spawnStartedAt !== undefined && state.agentStartedAt !== undefined) {
+		diagnostics.childStartupDurationMs = elapsedMilliseconds(spawnStartedAt, state.agentStartedAt);
+	}
+	if (state.agentStartedAt !== undefined && state.agentEndedAt !== undefined) {
+		diagnostics.agentExecutionDurationMs = elapsedMilliseconds(state.agentStartedAt, state.agentEndedAt);
+	}
+	if (state.usage !== undefined) diagnostics.usage = state.usage;
+	if (state.turnCount > 0) diagnostics.turns = state.turnCount;
+	return diagnostics;
 }
 
 async function canonicalizeCwd(input: string | undefined): Promise<string> {
@@ -632,6 +734,65 @@ interface PiProbeResult {
 	readonly version?: string;
 	readonly error?: string;
 	readonly aborted: boolean;
+}
+
+interface PiCompatibilityVerification {
+	readonly result: PiProbeResult;
+	readonly performed: boolean;
+	readonly durationMs?: number;
+}
+
+/** Successful and in-flight checks live only for this host process. */
+const piCompatibilityCache = new Map<string, Promise<PiProbeResult>>();
+
+function piCompatibilityCacheKey(
+	invocation: ChildInvocation,
+	cwd: string,
+	env: NodeJS.ProcessEnv | undefined,
+): string {
+	const inheritedEnvironmentKeys = ["PATH", "PATHEXT", "NODE_OPTIONS", "PI_CODING_AGENT_DIR"];
+	const mergedEnvironment = { ...process.env, ...env };
+	const keys = new Set([...inheritedEnvironmentKeys, ...Object.keys(env ?? {})]);
+	const environment = [...keys]
+		.sort()
+		.map((key) => [key, mergedEnvironment[key] ?? null]);
+	const commandIdentity = /[\\/]/u.test(invocation.command) ? resolve(cwd, invocation.command) : invocation.command;
+	const identity = JSON.stringify({ command: commandIdentity, args: invocation.args, environment });
+	return createHash("sha256").update(identity).digest("hex");
+}
+
+async function verifyPiVersion(
+	invocation: ChildInvocation,
+	cwd: string,
+	env: NodeJS.ProcessEnv | undefined,
+	signal: AbortSignal | undefined,
+): Promise<PiCompatibilityVerification> {
+	const key = piCompatibilityCacheKey(invocation, cwd, env);
+	const cached = piCompatibilityCache.get(key);
+	if (cached) return { result: await cached, performed: false };
+
+	const startedAt = performance.now();
+	let pending!: Promise<PiProbeResult>;
+	pending = probePiVersion(invocation, cwd, env, signal).then(
+		(result) => {
+			if (result.version !== undefined && !result.error && !result.aborted) {
+				piCompatibilityCache.set(key, Promise.resolve(result));
+			} else if (piCompatibilityCache.get(key) === pending) {
+				piCompatibilityCache.delete(key);
+			}
+			return result;
+		},
+		(error: unknown) => {
+			if (piCompatibilityCache.get(key) === pending) piCompatibilityCache.delete(key);
+			throw error;
+		},
+	);
+	piCompatibilityCache.set(key, pending);
+	return {
+		result: await pending,
+		performed: true,
+		durationMs: elapsedMilliseconds(startedAt),
+	};
 }
 
 async function probePiVersion(
@@ -738,29 +899,40 @@ async function probePiVersion(
 async function runPiChildAgent(options: ChildAgentOptions): Promise<ChildAgentResult> {
 	// Validate capability selection before entering the child-error recovery path;
 	// invalid profiles are caller errors, not child process failures.
+	const totalStartedAt = performance.now();
 	const tools = resolveTools(options);
 	if (options.signal?.aborted) {
-		return { status: "aborted", exitCode: null, text: "", stderr: "", errorMessage: "Child aborted before launch" };
+		return withDiagnostics(
+			{ status: "aborted", exitCode: null, text: "", stderr: "", errorMessage: "Child aborted before launch" },
+			{ totalRuntimeDurationMs: elapsedMilliseconds(totalStartedAt), queueWaitDurationMs: 0 },
+		);
 	}
 	const cwd = await canonicalizeCwd(options.cwd);
 	const access: CheckoutAccess = tools.includes("bash") ? "WRITABLE" : "READ_ONLY";
+	const queueStartedAt = performance.now();
+	let operationStartedAt: number | undefined;
 
 	try {
-		return await checkoutScheduler.run(
+		const result = await checkoutScheduler.run(
 			cwd,
 			access,
-			() => runPiChildAgentUnlocked(options, tools, cwd),
+			() => {
+				operationStartedAt = performance.now();
+				return runPiChildAgentUnlocked(options, tools, cwd);
+			},
 			options.signal,
 		);
+		return withDiagnostics(result, {
+			queueWaitDurationMs: elapsedMilliseconds(queueStartedAt, operationStartedAt ?? performance.now()),
+			totalRuntimeDurationMs: elapsedMilliseconds(totalStartedAt),
+		});
 	} catch (error) {
+		const queueWaitDurationMs = elapsedMilliseconds(queueStartedAt, operationStartedAt ?? performance.now());
 		if (options.signal?.aborted || isCheckoutAbortError(error)) {
-			return {
-				status: "aborted",
-				exitCode: null,
-				text: "",
-				stderr: "",
-				errorMessage: "Child aborted before launch",
-			};
+			return withDiagnostics(
+				{ status: "aborted", exitCode: null, text: "", stderr: "", errorMessage: "Child aborted before launch" },
+				{ queueWaitDurationMs, totalRuntimeDurationMs: elapsedMilliseconds(totalStartedAt) },
+			);
 		}
 		throw error;
 	}
@@ -779,6 +951,7 @@ async function runPiChildAgentUnlocked(
 		canonicalTexts: [],
 		agentEnded: false,
 		outputTruncated: false,
+		turnCount: 0,
 	};
 	let stderr = "";
 	let wasAborted = false;
@@ -786,6 +959,8 @@ async function runPiChildAgentUnlocked(
 	let clearTermination: (() => void) | undefined;
 	let tempDir: string | undefined;
 	let child: ChildProcess | undefined;
+	let spawnStartedAt: number | undefined;
+	let compatibilityCheckDurationMs: number | undefined;
 
 	let piVersion: string | undefined;
 	try {
@@ -793,13 +968,27 @@ async function runPiChildAgentUnlocked(
 			return { status: "aborted", exitCode: null, text: "", stderr: "", errorMessage: "Child aborted before launch" };
 		}
 
-		if (options.piCommand === undefined) {
-			const probe = await probePiVersion(invocation, cwd, options.env, options.signal);
-			if (probe.aborted) {
-				return { status: "aborted", exitCode: null, text: "", stderr: "", errorMessage: "Child aborted during Pi compatibility probe" };
-			}
-			if (probe.error) return failedResult(`Pi compatibility check failed: ${probe.error}`);
-			piVersion = probe.version;
+		const verification = await verifyPiVersion(invocation, cwd, options.env, options.signal);
+		if (verification.performed) compatibilityCheckDurationMs = verification.durationMs;
+		const probe = verification.result;
+		if (probe.aborted) {
+			return withDiagnostics(
+				{ status: "aborted", exitCode: null, text: "", stderr: "", errorMessage: "Child aborted during Pi compatibility probe" },
+				{ compatibilityCheckDurationMs },
+			);
+		}
+		if (probe.error) {
+			return withDiagnostics(
+				failedResult(`Pi compatibility check failed: ${probe.error}`),
+				{ compatibilityCheckDurationMs },
+			);
+		}
+		piVersion = probe.version;
+		if (piVersion === undefined) {
+			return withDiagnostics(
+				failedResult("Pi compatibility check did not return a verified version."),
+				{ compatibilityCheckDurationMs },
+			);
 		}
 
 		let systemPromptPath: string | undefined;
@@ -821,6 +1010,7 @@ async function runPiChildAgentUnlocked(
 		});
 
 		try {
+			spawnStartedAt = performance.now();
 			child = spawn(invocation.command, [...invocation.args, ...childArgs], {
 				cwd,
 				env: { ...process.env, ...options.env },
@@ -876,43 +1066,52 @@ async function runPiChildAgentUnlocked(
 					? "completed"
 					: "failed";
 
-		return {
-			status,
-			exitCode: outcome.exitCode,
-			text: state.text,
-			assistantMessage: state.assistantMessage,
-			stderr,
-			stopReason: state.stopReason,
-			errorMessage:
-				outcome.spawnError?.message ??
-				state.errorMessage ??
-				state.eventStreamError ??
-				(state.outputTruncated
-					? "Child output was truncated before canonical validation"
-					: status === "failed" && (!state.agentEnded || !state.assistantMessage)
-						? "Child exited without a canonical assistant result"
-						: status === "failed"
-							? "Child did not complete successfully"
-							: undefined),
-			outputTruncated: state.outputTruncated || undefined,
-			eventStreamError: state.eventStreamError,
-			...(piVersion === undefined ? {} : { piVersion }),
-		};
-	} catch (error) {
-		if (wasAborted || options.signal?.aborted) {
-			return {
-				status: "aborted",
-				exitCode: null,
-				text: state.text,
+		return withDiagnostics(
+			{
+				status,
+				exitCode: outcome.exitCode,
+				text: state.outputTruncated ? "" : state.text,
 				assistantMessage: state.assistantMessage,
 				stderr,
-				errorMessage: "Child aborted",
+				stopReason: state.stopReason,
+				errorMessage:
+					outcome.spawnError?.message ??
+					(state.outputTruncated
+						? `Worker result exceeded the ${MAX_WORKER_RESULT_BYTES}-byte limit; return a concise canonical result.`
+						: state.eventStreamError ??
+							state.errorMessage ??
+							(status === "failed" && (!state.agentEnded || !state.assistantMessage)
+								? "Child exited without a canonical assistant result"
+								: status === "failed"
+									? "Child did not complete successfully"
+									: undefined)),
 				outputTruncated: state.outputTruncated || undefined,
 				eventStreamError: state.eventStreamError,
 				...(piVersion === undefined ? {} : { piVersion }),
-			};
+			},
+			childDiagnostics(state, spawnStartedAt, compatibilityCheckDurationMs),
+		);
+	} catch (error) {
+		if (wasAborted || options.signal?.aborted) {
+			return withDiagnostics(
+				{
+					status: "aborted",
+					exitCode: null,
+					text: state.outputTruncated ? "" : state.text,
+					assistantMessage: state.assistantMessage,
+					stderr,
+					errorMessage: "Child aborted",
+					outputTruncated: state.outputTruncated || undefined,
+					eventStreamError: state.eventStreamError,
+					...(piVersion === undefined ? {} : { piVersion }),
+				},
+				childDiagnostics(state, spawnStartedAt, compatibilityCheckDurationMs),
+			);
 		}
-		return failedResult(error instanceof Error ? error.message : String(error), stderr);
+		return withDiagnostics(
+			failedResult(error instanceof Error ? error.message : String(error), stderr),
+			childDiagnostics(state, spawnStartedAt, compatibilityCheckDurationMs),
+		);
 	} finally {
 		removeAbort?.();
 		clearTermination?.();
@@ -953,16 +1152,20 @@ function runtimeMetadata(
 	};
 }
 
-function rethrowWithRuntimeDetails(
-	error: unknown,
+function runtimeDetailsWithoutModelContent(
 	runtime: SWEForgeTaskRuntimeMetadata,
-	output: string,
-): never {
+): Omit<SWEForgeTaskRuntimeMetadata, "text" | "assistantMessage"> {
+	return Object.fromEntries(
+		Object.entries(runtime).filter(([key]) => key !== "text" && key !== "assistantMessage"),
+	) as Omit<SWEForgeTaskRuntimeMetadata, "text" | "assistantMessage">;
+}
+
+function rethrowWithRuntimeDetails(error: unknown, runtime: SWEForgeTaskRuntimeMetadata): never {
 	if (error instanceof SWEForgeRuntimeError) {
 		throw new SWEForgeRuntimeError(error.code, error.message, {
 			status: error.status,
 			cause: error,
-			details: { ...(error.details ?? {}), output, runtime },
+			details: { ...(error.details ?? {}), runtime: runtimeDetailsWithoutModelContent(runtime) },
 		});
 	}
 	throw error;
@@ -1019,7 +1222,9 @@ export async function executeSWEForgeTask(options: SWEForgeTaskOptions): Promise
 
 	if (child.status !== "completed") {
 		return {
-			output: child.text,
+			// Failed/aborted child text is never a canonical worker result. Returning
+			// an empty output keeps the extension content on the structured error path.
+			output: "",
 			runtime,
 			validation: undefined,
 		};
@@ -1036,6 +1241,6 @@ export async function executeSWEForgeTask(options: SWEForgeTaskOptions): Promise
 			validation,
 		};
 	} catch (error) {
-		return rethrowWithRuntimeDetails(error, runtime, child.text);
+		return rethrowWithRuntimeDetails(error, runtime);
 	}
 }
