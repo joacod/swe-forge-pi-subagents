@@ -12,31 +12,22 @@ execution.
 
 ## Quick start
 
-This package is not published to npm yet. Before you start, install Pi and
-Node.js `>=22.19.0`. A fresh setup needs SWE Forge and this repository; the
-supported pre-publication path is a local source installation:
+Install [SWE Forge](https://github.com/joacod/swe-forge) separately using its
+[installation guide](https://github.com/joacod/swe-forge/blob/main/docs/installation.md)
+before continuing. This extension assumes SWE Forge is already installed and
+available to Pi.
+
+This package is not published to npm yet. To install the extension from its
+source checkout, use Node.js `>=22.19.0`:
 
 ```bash
-SWE_FORGE_DIR="$HOME/tools/swe-forge"
-SUBAGENTS_DIR="$HOME/tools/swe-forge-pi-subagents"
-
-mkdir -p "$HOME/tools"
-git clone https://github.com/joacod/swe-forge.git "$SWE_FORGE_DIR"
-git clone https://github.com/joacod/swe-forge-pi-subagents.git "$SUBAGENTS_DIR"
-
-"$SWE_FORGE_DIR/scripts/swe-forge" install pi
-(
-  cd "$SUBAGENTS_DIR"
-  npm ci
-)
-pi install "$SUBAGENTS_DIR"
+git clone https://github.com/joacod/swe-forge-pi-subagents.git
+cd swe-forge-pi-subagents
+npm ci
+pi install .
 ```
 
-If SWE Forge is already installed, keep that installation, clone this
-repository, run `npm ci`, and install it with
-`pi install /absolute/path/to/swe-forge-pi-subagents`. Use
-`pi install -l /absolute/path/to/swe-forge-pi-subagents` for a project-local Pi
-installation.
+Use `pi install -l .` for a project-local Pi installation.
 
 Restart Pi or run `/reload`, then confirm the package with:
 
@@ -50,9 +41,6 @@ activated explicitly, for example:
 ```text
 /swe-forge pr <ticket>
 ```
-
-See the [SWE Forge Pi installation guide](https://github.com/joacod/swe-forge/blob/main/docs/installation.md#optional-pi-subagents-backend)
-for the complete installation procedure.
 
 ## What it adds
 
