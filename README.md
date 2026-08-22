@@ -35,7 +35,8 @@ pi install "$SUBAGENTS_DIR"
 If SWE Forge is already installed, keep that installation, clone this
 repository, run `npm ci`, and install it with
 `pi install /absolute/path/to/swe-forge-pi-subagents`. Use
-`pi install -l ...` for a project-local Pi installation.
+`pi install -l /absolute/path/to/swe-forge-pi-subagents` for a project-local Pi
+installation.
 
 Restart Pi or run `/reload`, then confirm the package with:
 
