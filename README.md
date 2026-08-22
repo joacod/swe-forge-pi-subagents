@@ -87,7 +87,7 @@ mkdir -p "$HOME/tools"
 git clone https://github.com/joacod/swe-forge.git "$SWE_FORGE_DIR"
 git clone https://github.com/joacod/swe-forge-pi-subagents.git "$SUBAGENTS_DIR"
 
-"$SWE_FORGE_DIR/scripts/swe-forge" install pi --global
+"$SWE_FORGE_DIR/scripts/swe-forge" install pi
 (
   cd "$SUBAGENTS_DIR"
   npm ci

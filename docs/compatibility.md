@@ -146,8 +146,8 @@ C writes to a disposable temporary checkout:
 
 ```bash
 cd /path/to/swe-forge
-scripts/swe-forge install pi --global
-scripts/swe-forge verify pi --global
+scripts/swe-forge install pi
+scripts/swe-forge verify pi
 
 cd /path/to/swe-forge-pi-subagents
 npm install
