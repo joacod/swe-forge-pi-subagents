@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+	assertSWEForgeWorkerBriefValidator,
 	discoverSWEForgeInstallation,
 	isSWEForgeInstallationError,
 	type SWEForgeDiscoveryOptions,
@@ -179,6 +180,11 @@ export async function getSWEForgeCapabilities(
 
 	let roles: readonly string[] = [];
 	const compatibilityErrors: SWEForgeCompatibilityError[] = [];
+	try {
+		await assertSWEForgeWorkerBriefValidator(installation);
+	} catch (error) {
+		compatibilityErrors.push(compatibilityError(error));
+	}
 	try {
 		roles = await discoverCanonicalRoleNames(discovery);
 	} catch (error) {

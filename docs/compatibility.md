@@ -42,7 +42,9 @@ explicit development/test override; it never falls back to a project-local
 `.swe-forge/` tree. A root must contain regular-file targets for `SWE-FORGE.md`,
 `AGENTS.md`, and `VERSION`, plus a `.swe-forge` directory. The root is
 normalized through `realpath`; supported-root entries and role files may be
-symlinks, but their targets must be readable regular files. Role names are an
+symlinks, but their targets must be readable regular files. The worker-brief
+validator is resolved as `.swe-forge/tools/swe-forge-worker-brief` under that
+same root and is required to be a regular executable file. Role names are an
 allowlisted single path segment, so absolute paths, separators, drive syntax,
 `.`/`..`, and NUL bytes are rejected before resolution.
 
@@ -56,6 +58,9 @@ result.
 These checks do not eliminate filesystem TOCTOU races or make a user-owned
 SWE-Forge installation trustworthy. The installation path is a user-level
 trust boundary and should not be replaced with a repository-controlled path.
+The package invokes the canonical validator directly with `validate --brief -`
+and bounded stderr; a missing, unexecutable, failed, or abnormally terminated
+validator fails closed rather than reviving local worker-brief grammar checks.
 
 ## Pi child boundary
 
@@ -123,16 +128,14 @@ subagent runtime or other production dependency is needed. The build, test,
 lint, and format checks use the existing TypeScript/Node toolchain without
 adding an unneeded formatter or linter dependency.
 
-`projection.ts` intentionally validates a minimal duplicated
-`worker_briefing/v1` wire shape because SWE-Forge does not currently publish a
-small versioned schema export. It checks the root-rendered marker/schema,
-concrete `task_id`, profile access, `SUBAGENTS` topology, and `SHARED`
-write-isolation without rendering or loading the canonical task contract. The
-result projection recognizes the current `RESULT_PROFILE`/`FINDINGS`/`EVIDENCE`
-shape and the older `SUMMARY`/`VALIDATION` fixture shape within the tested
-0.1.x line; it does not define or bundle either contract. This is deferred
-technical debt: validation remains fail-closed until a low-coupling canonical
-schema boundary exists.
+`projection.ts` delegates `worker_briefing/v1` structural validation to the
+canonical worker-brief executable. After it succeeds, the adapter extracts
+only the exact `task_id`, `write_access`, `topology`, and `write_isolation`
+fields needed to enforce its shared `SUBAGENTS` execution capability and to
+validate returned task identity. The result projection recognizes the current
+`RESULT_PROFILE`/`FINDINGS`/`EVIDENCE` shape and the older
+`SUMMARY`/`VALIDATION` fixture shape within the tested 0.1.x line; it does not
+define or bundle either contract.
 
 When updating Pi or SWE-Forge, rerun the repository tests, package-install
 smoke test, and a fixture-backed child invocation. If a public flag, event

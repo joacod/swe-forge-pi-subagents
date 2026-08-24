@@ -20,7 +20,6 @@ import {
 	type ExpectedOutputContract,
 	MAX_WORKER_RESULT_BYTES,
 	validateCanonicalOutput,
-	validateWorkerBriefing,
 } from "./projection.js";
 
 /** The built-in Pi tools that are available to the child runtime. */
@@ -1247,16 +1246,14 @@ export async function executeSWEForgeTask(options: SWEForgeTaskOptions): Promise
 	validateThinkingLevel(internalOptions.thinkingLevel);
 	const cwd = await canonicalizeCwd(internalOptions.cwd);
 
-	const briefingValidation = validateWorkerBriefing(internalOptions.workerBriefing, {
-		expectedWriteAccess: internalOptions.profile,
-	});
 	const prompt = await composeRuntimePrompt({
 		role: internalOptions.role,
 		workerBriefing: internalOptions.workerBriefing,
 		expectedOutputContract: internalOptions.expectedOutputContract,
+		expectedWriteAccess: internalOptions.profile,
 		discovery: internalOptions.discovery,
 	});
-	const taskId = briefingValidation.taskId ?? extractWorkerBriefingTaskIdentifier(internalOptions.workerBriefing);
+	const taskId = extractWorkerBriefingTaskIdentifier(internalOptions.workerBriefing);
 	const child = await runPiChildAgent({
 		task: "Execute the bounded SWE-Forge task and return only the required canonical output.",
 		systemPrompt: prompt,
