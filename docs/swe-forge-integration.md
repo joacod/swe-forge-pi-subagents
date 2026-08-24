@@ -46,7 +46,10 @@ canonical roles/contracts, or `ISOLATED`/worktree execution.
   profile;
 - the child conversation/process boundary, bounded transport diagnostics,
   cancellation cleanup, and the process-local shared-reader/exclusive-writer
-  checkout lock; and
+  checkout lock;
+- delegation of worker-brief structural validation to the discovered canonical
+  `.swe-forge/tools/swe-forge-worker-brief` executable, followed by the
+  adapter-specific SUBAGENTS/shared-checkout/profile checks; and
 - recognizable task/output boundary validation.
 
 It does not own workflow state, task queues, planner data, provider/model
@@ -91,11 +94,15 @@ Only after the canonical workflow has selected or considered a useful bounded
 
 The extension uses the current Pi checkout/model context, loads the selected
 canonical role and expected result/review contract live, and returns canonical
-output as the primary result with runtime metadata separate. The root renders
-the worker briefing; this package validates only its small `worker_briefing/v1`
-execution shape and does not load `task.md` for a child launch. Optional timing
-and final-usage diagnostics remain in the non-model-visible metadata path and
-are never part of the canonical result.
+output as the primary result with runtime metadata separate. SWE Forge renders
+the worker briefing and the canonical
+`.swe-forge/tools/swe-forge-worker-brief` executable owns its structural
+validation. This package invokes that executable with `validate --brief -`
+from the same discovered installation, then enforces only its bounded
+`SUBAGENTS`/shared-checkout/profile execution constraints. It does not load
+`task.md` for a child launch. Optional timing and final-usage diagnostics remain
+in the non-model-visible metadata path and are never part of the canonical
+result.
 The main adapter must consume the output as untrusted worker data, preserve
 `BLOCKED`/`FAILED` semantics, and continue to own validation evidence and
 acceptance. A child result is never proof that a test, Git operation,
@@ -176,13 +183,17 @@ The package may be loaded by Pi after a user installs it globally, in project
 settings, or for a one-run test. That load only registers the optional tool. It
 does not activate `/swe-forge`, run a task, change canonical routing, or
 install SWE-Forge. The main SWE-Forge installer must preserve that separation.
+The canonical worker-brief validator is resolved from that same installed
+support root; if it is missing or not executable, this optional backend is
+unavailable rather than falling back to local structural parsing.
 
 If the package is removed or Pi disables it, the main adapter must still expose
 its normal `/swe-forge` behavior and its existing sequential fallback. An
-unsupported Pi/SWE-Forge version, missing canonical root, missing role, or
-child-process failure must degrade to the same fallback or canonical blocked
-status that the existing adapter already uses; it must not trigger an implicit
-package installation or a topology rewrite.
+unsupported Pi/SWE-Forge version, missing canonical root, missing role,
+missing worker-brief validator, or child-process failure must degrade to the
+same fallback or canonical blocked status that the existing adapter already
+uses; it must not trigger an implicit package installation or a topology
+rewrite.
 
 ## Version and source ownership
 

@@ -1,4 +1,5 @@
-import { realpath, readFile, stat } from "node:fs/promises";
+import { constants } from "node:fs";
+import { access, realpath, readFile, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { isAbsolute, join, normalize, resolve } from "node:path";
 
@@ -17,6 +18,7 @@ export const SWE_FORGE_COMPATIBILITY_POLICY = {
 } as const;
 
 const DEFAULT_SUPPORT_PATH = join(".pi", "agent", "swe-forge");
+const WORKER_BRIEF_VALIDATOR_RELATIVE_PATH = join(".swe-forge", "tools", "swe-forge-worker-brief");
 const REQUIRED_ENTRIES = [
 	{ name: "SWE-FORGE.md", kind: "file" },
 	{ name: "AGENTS.md", kind: "file" },
@@ -30,7 +32,8 @@ export type SWEForgeInstallationErrorCode =
 	| "INCOMPLETE"
 	| "INVALID_PATH"
 	| "INVALID_VERSION"
-	| "UNSUPPORTED_VERSION";
+	| "UNSUPPORTED_VERSION"
+	| "WORKER_BRIEF_VALIDATOR_UNAVAILABLE";
 
 export interface SWEForgeInstallationErrorOptions {
 	readonly root?: string;
@@ -71,6 +74,7 @@ export interface SWEForgeInstallation {
 		readonly instructions: string;
 		readonly canonical: string;
 		readonly version: string;
+		readonly workerBriefValidator: string;
 	};
 }
 
@@ -283,8 +287,29 @@ export async function discoverSWEForgeInstallation(
 			instructions: entryPath(root, { name: "AGENTS.md", kind: "file" }),
 			canonical: entryPath(root, { name: ".swe-forge", kind: "directory" }),
 			version: versionPath,
+			workerBriefValidator: normalize(join(root, WORKER_BRIEF_VALIDATOR_RELATIVE_PATH)),
 		},
 	};
+}
+
+export async function assertSWEForgeWorkerBriefValidator(
+	installation: SWEForgeInstallation,
+): Promise<void> {
+	const path = installation.paths.workerBriefValidator;
+	try {
+		const info = await stat(path);
+		if (!info.isFile()) throw new Error("expected a regular file");
+		await access(path, constants.X_OK);
+	} catch (error) {
+		const relativePath = WORKER_BRIEF_VALIDATOR_RELATIVE_PATH;
+		const missing = errorCode(error) === "ENOENT" || errorCode(error) === "ENOTDIR" ? [relativePath] : [];
+		const invalid = missing.length > 0 ? [] : [relativePath];
+		throw new SWEForgeInstallationError(
+			"WORKER_BRIEF_VALIDATOR_UNAVAILABLE",
+			`Canonical SWE-Forge worker-brief validator is unavailable at ${path}`,
+			{ root: installation.root, missing, invalid, cause: error },
+		);
+	}
 }
 
 export function isSWEForgeInstallationError(error: unknown): error is SWEForgeInstallationError {

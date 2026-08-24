@@ -46,6 +46,9 @@ activated explicitly, for example:
 
 - **One bounded child run.** Starts a fresh Pi JSON subprocess for one
   root-rendered `worker_briefing/v1` projection.
+- **Canonical worker-brief validation.** Delegates structural validation to
+  `.swe-forge/tools/swe-forge-worker-brief` from the discovered SWE Forge root,
+  then enforces only this adapter's execution constraints.
 - **Live canonical sources.** Reads the selected role and output contract from
   the installed SWE Forge support root instead of bundling copies.
 - **Closed tool profiles.** `READ_ONLY` exposes `read`, `grep`, `find`, and
@@ -126,9 +129,10 @@ trust model, result limits, and real-Pi acceptance setup.
 intended scope, then restart Pi or run `/reload`.
 
 **SWE Forge is unavailable.** Install SWE Forge separately and verify that
-`~/.pi/agent/swe-forge/` contains the required root files and
-`.swe-forge/agents` plus `.swe-forge/contracts`. Do not use a project-local
-support tree as a workaround.
+`~/.pi/agent/swe-forge/` contains the required root files,
+`.swe-forge/agents`, `.swe-forge/contracts`, and the executable
+`.swe-forge/tools/swe-forge-worker-brief`. Do not use a project-local support
+tree as a workaround.
 
 **A child cannot run.** Confirm that Pi is in the supported version range, that
 Pi authentication works in a normal session, and that the selected profile

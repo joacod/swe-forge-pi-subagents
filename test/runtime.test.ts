@@ -1,4 +1,4 @@
-import { access, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { after, afterEach, before, test } from "node:test";
 import assert from "node:assert/strict";
 import { dirname, join } from "node:path";
@@ -274,6 +274,39 @@ test("uses the assigned task ID through runtime when dependencies have task IDs"
 
 	assert.equal(result.runtime.taskId, "task-123");
 	assert.equal(result.validation?.taskId, "task-123");
+});
+
+test("rejects canonical worker-brief validation before starting Pi", async () => {
+	const root = await createCanonicalRoot();
+	const project = await createProject();
+	const recordPathValue = await recordPath();
+
+	await assert.rejects(
+		executeSWEForgeTask({
+			...childOptions(root, project, recordPathValue, "success", "READ_ONLY"),
+			workerBriefing: `${WORKER_BRIEFING}\nCANONICAL_REJECT`,
+		}),
+		(error: unknown) =>
+			error instanceof SWEForgeRuntimeError &&
+				error.code === "INVALID_WORKER_BRIEFING" &&
+				/fixture canonical validator rejected/u.test(error.message),
+	);
+	await assert.rejects(access(recordPathValue));
+});
+
+test("resolves the validator from the discovered installation, not the project checkout", async () => {
+	const root = await createCanonicalRoot();
+	const project = await createProject();
+	const localTool = join(project, ".swe-forge", "tools", "swe-forge-worker-brief");
+	await mkdir(join(project, ".swe-forge", "tools"), { recursive: true });
+	await writeFile(localTool, "#!/bin/sh\nprintf 'project-local validator must not run\\n' >&2\nexit 1\n", {
+		encoding: "utf8",
+		mode: 0o755,
+	});
+	const recordPathValue = await recordPath();
+
+	const result = await executeSWEForgeTask(childOptions(root, project, recordPathValue, "success", "READ_ONLY"));
+	assert.equal(result.runtime.status, "completed");
 });
 
 test("caches one successful Pi compatibility probe for repeated invocation configuration", async () => {

@@ -143,8 +143,8 @@ test("composes the root-rendered worker briefing and concise runtime guardrails"
 
 test("composing an empty worker briefing is an explicit blocked runtime error", async () => {
 	const root = await createCanonicalRoot();
-	assert.throws(
-		() => validateWorkerBriefing("\n\t"),
+	await assert.rejects(
+		validateWorkerBriefing("\n\t"),
 		(error: unknown) =>
 			error instanceof SWEForgeRuntimeError &&
 				error.code === "EMPTY_WORKER_BRIEFING" &&
@@ -161,52 +161,69 @@ test("composing an empty worker briefing is an explicit blocked runtime error", 
 	);
 });
 
-test("validates worker_briefing/v1 fields, profile access, and task identity", () => {
+test("delegates structural validation before applying adapter-specific checks", async () => {
+	const root = await createCanonicalRoot();
 	assert.equal(extractWorkerBriefingTaskIdentifier(WORKER_BRIEFING), "task-123");
 	assert.equal(extractWorkerBriefingTaskIdentifier("objective: no id\n"), undefined);
-	assert.deepEqual(validateWorkerBriefing(WORKER_BRIEFING, { expectedWriteAccess: "READ_ONLY" }), {
+	assert.deepEqual(await validateWorkerBriefing(WORKER_BRIEFING, { discovery: discovery(root), expectedWriteAccess: "READ_ONLY" }), {
 		valid: true,
 		taskId: "task-123",
 		writeAccess: "READ_ONLY",
 		topology: "SUBAGENTS",
 		writeIsolation: "SHARED",
 	});
-	assert.equal(validateWorkerBriefing(WRITABLE_WORKER_BRIEFING, { expectedWriteAccess: "WRITABLE" }).writeAccess, "WRITABLE");
-	assert.throws(
-		() => validateWorkerBriefing(WORKER_BRIEFING.replace("worker_briefing:\n", "")),
-		(error: unknown) => error instanceof SWEForgeRuntimeError && error.code === "MISSING_WORKER_BRIEFING_FIELD",
+	assert.equal(
+		(await validateWorkerBriefing(WRITABLE_WORKER_BRIEFING, {
+			discovery: discovery(root),
+			expectedWriteAccess: "WRITABLE",
+		})).writeAccess,
+		"WRITABLE",
 	);
-	assert.throws(
-		() => validateWorkerBriefing(WORKER_BRIEFING.replace("  schema: worker-brief/v1\n", "")),
-		(error: unknown) => error instanceof SWEForgeRuntimeError && error.code === "MISSING_WORKER_BRIEFING_FIELD",
-	);
-	assert.throws(
-		() => validateWorkerBriefing("worker_briefing:\n  schema: worker-brief/v1\n", { expectedWriteAccess: "READ_ONLY" }),
-		(error: unknown) => error instanceof SWEForgeRuntimeError && error.code === "MISSING_WORKER_BRIEFING_FIELD",
-	);
-	assert.throws(
-		() => validateWorkerBriefing(WORKER_BRIEFING.replace("worker-brief/v1", "worker-brief/v2")),
-		(error: unknown) => error instanceof SWEForgeRuntimeError && error.code === "UNSUPPORTED_WORKER_BRIEFING_SCHEMA",
-	);
-	assert.throws(
-		() => validateWorkerBriefing(WORKER_BRIEFING.replace("  task_id: task-123", "  task_id: <assigned task identifier>")),
-		(error: unknown) => error instanceof SWEForgeRuntimeError && error.code === "MISSING_TASK_ID",
-	);
-	assert.throws(
-		() => validateWorkerBriefing(WORKER_BRIEFING, { expectedWriteAccess: "WRITABLE" }),
-		(error: unknown) => error instanceof SWEForgeRuntimeError && error.code === "ACCESS_CONFLICT",
-	);
-	assert.throws(
-		() => validateWorkerBriefing(WORKER_BRIEFING.replace("topology: SUBAGENTS", "topology: SOLO")),
-		(error: unknown) => error instanceof SWEForgeRuntimeError && error.code === "INVALID_WORKER_BRIEFING",
-	);
-	assert.throws(
-		() => validateWorkerBriefing(WORKER_BRIEFING.replace("write_isolation: SHARED", "write_isolation: WORKTREE")),
-		(error: unknown) => error instanceof SWEForgeRuntimeError && error.code === "INVALID_WORKER_BRIEFING",
+
+	await assert.rejects(
+		validateWorkerBriefing(`${WORKER_BRIEFING}\nCANONICAL_REJECT`, { discovery: discovery(root) }),
+		(error: unknown) =>
+			error instanceof SWEForgeRuntimeError &&
+				error.code === "INVALID_WORKER_BRIEFING" &&
+				error.status === "BLOCKED" &&
+				/fixture canonical validator rejected/u.test(error.message),
 	);
 });
 
-test("uses the assigned worker task path instead of completed dependency task IDs", () => {
+test("reports an unavailable canonical worker-brief validator", async () => {
+	const root = await createCanonicalRoot();
+	await rm(join(root, ".swe-forge", "tools", "swe-forge-worker-brief"));
+
+	await assert.rejects(
+		validateWorkerBriefing(WORKER_BRIEFING, { discovery: discovery(root) }),
+		(error: unknown) =>
+			error instanceof SWEForgeRuntimeError &&
+				error.code === "WORKER_BRIEF_VALIDATOR_UNAVAILABLE" &&
+				error.status === "FAILED",
+	);
+});
+
+test("keeps profile, topology, isolation, and task identity checks in the adapter", async () => {
+	const root = await createCanonicalRoot();
+	await assert.rejects(
+		validateWorkerBriefing(WORKER_BRIEFING, { discovery: discovery(root), expectedWriteAccess: "WRITABLE" }),
+		(error: unknown) => error instanceof SWEForgeRuntimeError && error.code === "ACCESS_CONFLICT",
+	);
+	await assert.rejects(
+		validateWorkerBriefing(WORKER_BRIEFING.replace("topology: SUBAGENTS", "topology: SOLO"), { discovery: discovery(root) }),
+		(error: unknown) => error instanceof SWEForgeRuntimeError && error.code === "INVALID_WORKER_BRIEFING",
+	);
+	await assert.rejects(
+		validateWorkerBriefing(WORKER_BRIEFING.replace("write_isolation: SHARED", "write_isolation: WORKTREE"), { discovery: discovery(root) }),
+		(error: unknown) => error instanceof SWEForgeRuntimeError && error.code === "INVALID_WORKER_BRIEFING",
+	);
+	await assert.rejects(
+		validateWorkerBriefing(WORKER_BRIEFING.replace("  task_id: task-123", "  task_id: <assigned task identifier>"), { discovery: discovery(root) }),
+		(error: unknown) => error instanceof SWEForgeRuntimeError && error.code === "MISSING_TASK_ID",
+	);
+});
+
+test("uses the assigned worker task path instead of completed dependency task IDs", async () => {
 	const briefing = `worker_briefing:
   schema: worker-brief/v1
   task_id: implementation-B
@@ -229,7 +246,8 @@ test("uses the assigned worker task path instead of completed dependency task ID
 `;
 
 	assert.equal(extractWorkerBriefingTaskIdentifier(briefing), "implementation-B");
-	assert.deepEqual(validateWorkerBriefing(briefing, { expectedWriteAccess: "READ_ONLY" }), {
+	const root = await createCanonicalRoot();
+	assert.deepEqual(await validateWorkerBriefing(briefing, { discovery: discovery(root), expectedWriteAccess: "READ_ONLY" }), {
 		valid: true,
 		taskId: "implementation-B",
 		writeAccess: "READ_ONLY",
@@ -238,25 +256,10 @@ test("uses the assigned worker task path instead of completed dependency task ID
 	});
 });
 
-test("rejects conflicting worker briefing metadata instead of choosing the first declaration", () => {
-	const conflictingWriteAccess = WORKER_BRIEFING.replace(
-		"    write_isolation: SHARED\n",
-		"    write_isolation: SHARED\n    write_access: read-write\n",
-	);
-	assert.throws(
-		() => validateWorkerBriefing(conflictingWriteAccess),
-		(error: unknown) => error instanceof SWEForgeRuntimeError && error.code === "ACCESS_CONFLICT",
-	);
-	assert.throws(
-		() => validateWorkerBriefing(`${WORKER_BRIEFING}  task_id: other\n`),
-		(error: unknown) => error instanceof SWEForgeRuntimeError && error.code === "CONFLICTING_TASK_ID",
-	);
-});
-
-test("rejects a worker briefing above the bounded input limit", () => {
+test("rejects a worker briefing above the bounded input limit", async () => {
 	const oversized = WORKER_BRIEFING + "x".repeat(512 * 1024);
-	assert.throws(
-		() => validateWorkerBriefing(oversized),
+	await assert.rejects(
+		validateWorkerBriefing(oversized),
 		(error: unknown) => error instanceof SWEForgeRuntimeError && error.code === "WORKER_BRIEFING_TOO_LARGE",
 	);
 });

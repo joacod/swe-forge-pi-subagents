@@ -41,6 +41,10 @@ test("discovers a valid canonical installation", async () => {
 	assert.equal(installation.root, normalizedRoot);
 	assert.equal(installation.version, "0.1.0-alpha.1");
 	assert.equal(installation.paths.canonical, join(normalizedRoot, ".swe-forge"));
+	assert.equal(
+		installation.paths.workerBriefValidator,
+		join(normalizedRoot, ".swe-forge", "tools", "swe-forge-worker-brief"),
+	);
 });
 
 test("discovers the standard Pi support path", async () => {

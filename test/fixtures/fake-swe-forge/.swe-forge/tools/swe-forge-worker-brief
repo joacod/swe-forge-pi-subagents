@@ -1,0 +1,23 @@
+#!/bin/sh
+
+set -eu
+
+if [ "$#" -ne 3 ] || [ "$1" != "validate" ] || [ "$2" != "--brief" ] || [ "$3" != "-" ]; then
+  printf 'unexpected validator arguments\n' >&2
+  exit 2
+fi
+
+brief=$(cat)
+case "$brief" in
+  *CANONICAL_REJECT*)
+    printf 'fixture canonical validator rejected the briefing\n' >&2
+    exit 1
+    ;;
+  *worker_briefing:*)
+    printf 'PASS: fixture worker briefing validated\n'
+    ;;
+  *)
+    printf 'fixture canonical validator rejected the briefing\n' >&2
+    exit 1
+    ;;
+esac

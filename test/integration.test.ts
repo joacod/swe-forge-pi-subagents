@@ -41,6 +41,16 @@ test("integrates against a copied tiny fake SWE-Forge installation", async () =>
 	assert.deepEqual(capabilities.compatibilityErrors, []);
 });
 
+test("reports a missing canonical worker-brief validator as unavailable capability", async () => {
+	const root = await copyFakeSWEForgeInstallation();
+	temporaryPaths.push(root);
+	await rm(join(root, ".swe-forge", "tools", "swe-forge-worker-brief"));
+
+	const capabilities = await getSWEForgeCapabilities(discovery(root));
+	assert.equal(capabilities.sweForge.installed, true);
+	assert.equal(capabilities.compatibilityErrors[0]?.code, "WORKER_BRIEF_VALIDATOR_UNAVAILABLE");
+});
+
 test("fails clearly when a fake installation has no canonical roles", async () => {
 	const root = await copyFakeSWEForgeInstallation();
 	temporaryPaths.push(root);

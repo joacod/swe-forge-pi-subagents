@@ -15,6 +15,9 @@ boundary, transport, and child-access coordination details:
 
 - discover canonical role names and load selected role/contract markdown from
   the detected support root without copying or translating it;
+- invoke the canonical `.swe-forge/tools/swe-forge-worker-brief` validator from
+  that same support root, then enforce only the adapter's bounded
+  `SUBAGENTS`/shared-checkout/profile constraints;
 - compose one bounded prompt from the selected role, supplied worker briefing,
   expected output contract, and the required Pi-runtime guardrail;
 - launch a child with an explicit checkout, model, prompt, and tool allowlist;
@@ -169,9 +172,10 @@ tool that delegates to it. Capability discovery is explicitly versioned with
 `protocolVersion: 1`, independent of `packageVersion`. It does not expose
 parallel, chain, role, or workflow APIs.
 The parent supplies the root-rendered worker briefing and selected role as an
-explicit system-prompt append; the child uses Pi's normal built-in system
-prompt and tools but no discovered extensions, skills, templates, context files,
-or themes.
+explicit system-prompt append; the package delegates structural worker-brief
+validation to the canonical executable before loading the role/contract prompt.
+The child uses Pi's normal built-in system prompt and tools but no discovered
+extensions, skills, templates, context files, or themes.
 The only profiles are `READ_ONLY` (`read`, `grep`, `find`, `ls`) and `WRITABLE`
 (the read-only tools plus `edit`, `write`, `bash`). This makes resource loading
 predictable and prevents the adapter's own extension from being rediscovered
